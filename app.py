@@ -224,11 +224,10 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
             rows = ws.findall('.//ss:Row', NS)
             for row in rows:
                 cells = row.findall('ss:Cell', NS)
-                # Source.xml has a different structure (key, unit, value) vs Levels.xml (key, unit, val1, val2...)
-                data_col = col_offset if is_source else col_offset + 1
+                data_col = 2 if is_source else col_offset
                 if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
-                    cell_text = cells[0].find('ss:Data', NS).text
-                    if cell_text and key_name in cell_text:
+                    cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
+                    if cell_text == key_name:
                         value_node = cells[data_col].find('ss:Data', NS)
                         return value_node.text if value_node is not None and value_node.text else "N/A"
             return "N/A"
@@ -238,17 +237,17 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
             'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2, is_source=True)] * 2,
             'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2, is_source=True)],
             'Pressure Ps/Pd (psig)': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
             ],
             'Temp Ts/Td': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
             ],
-            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index)] * 2,
+            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
             'Indicated Power (ihp)': [
-                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index),
-                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index)
+                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
+                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
             ]
         }
         
@@ -274,10 +273,10 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
             rows = ws.findall('.//ss:Row', NS)
             for row in rows:
                 cells = row.findall('ss:Cell', NS)
-                data_col = col_offset if is_source else col_offset + 1
+                data_col = 2 if is_source else col_offset
                 if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
-                    cell_text = cells[0].find('ss:Data', NS).text
-                    if cell_text and key_name in cell_text:
+                    cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
+                    if cell_text == key_name:
                         value_node = cells[data_col].find('ss:Data', NS)
                         return value_node.text if value_node is not None and value_node.text else "N/A"
             return "N/A"
@@ -286,12 +285,12 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
             detail = {
                 "name": f"Cylinder {i}",
                 "bore": find_value(source_root, 'Source', f'CYLINDER {i} BORE DIAMETER', 2, is_source=True),
-                "suction_temp": find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i),
-                "discharge_temp": find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i),
-                "suction_pressure": find_value(levels_root, 'Levels', 'SUCTION PRESSURE', i),
-                "discharge_pressure": find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i),
-                "flow_balance_ce": find_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i),
-                "flow_balance_he": find_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i)
+                "suction_temp": find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i + 1),
+                "discharge_temp": find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i + 1),
+                "suction_pressure": find_value(levels_root, 'Levels', 'SUCTION PRESSURE', i + 1),
+                "discharge_pressure": find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i + 1),
+                "flow_balance_ce": find_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i + 1),
+                "flow_balance_he": find_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i + 1)
             }
             details.append(detail)
         return details
@@ -496,6 +495,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         
                         st.header("🏷️ Anomaly Labeling")
                         with st.expander("Add labels to detected anomalies and valve events"):
+                            # ... (labeling UI remains the same)
                             st.subheader("Fault Labels")
                             for item in report_data:
                                 if item['count'] > 0:
