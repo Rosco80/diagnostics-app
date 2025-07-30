@@ -124,6 +124,28 @@ def extract_rpm(_levels_xml_content):
         return "N/A"
     return "N/A"
 
+def extract_temperature(_levels_xml_content, cylinder_index):
+    """Extracts discharge temperature for a specific cylinder index."""
+    try:
+        root = ET.fromstring(_levels_xml_content)
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
+        if ws_levels is None: return "N/A"
+        
+        table = ws_levels.find('.//ss:Table', NS)
+        rows = table.findall('ss:Row', NS)
+        for row in rows:
+            cells = row.findall('ss:Cell', NS)
+            if len(cells) > cylinder_index + 1 and cells[0].find('ss:Data', NS) is not None:
+                cell_text = cells[0].find('ss:Data', NS).text
+                if cell_text and "DISCHARGE TEMPERATURE" in cell_text:
+                    temp_node = cells[cylinder_index + 1].find('ss:Data', NS)
+                    if temp_node is not None and temp_node.text:
+                        return f"{float(temp_node.text):.1f}°C"
+    except (ValueError, IndexError):
+        return "N/A"
+    return "N/A"
+
 @st.cache_data
 def auto_discover_configuration(_source_xml_content, _curves_xml_content):
     """
@@ -279,6 +301,9 @@ with st.sidebar:
     machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
     machine_id_options = [row[0] for row in machine_ids]
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
+    
+    st.header("4. Export")
+    st.components.v1.html('<button onclick="window.print()">Print Report (PDF)</button>', height=40)
 
 
 # --- Main Application Logic ---
@@ -377,7 +402,9 @@ if uploaded_files and len(uploaded_files) == 3:
                                             st.success(f"Events for {item['name']} saved. Chart will update on next interaction.")
                         
                         st.header("📝 Diagnostic Summary")
-                        st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm}")
+                        cylinder_index = int(selected_cylinder_name.split(" ")[-1])
+                        discharge_temp = extract_temperature(files_content['levels'], cylinder_index)
+                        st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm} | **Discharge Temp:** {discharge_temp}")
                         st.markdown(f"**Data Points Analyzed:** {len(df)}")
                         st.markdown("--- \n ### Anomaly Summary")
                         for item in report_data:
