@@ -140,10 +140,10 @@ def extract_temperature(_levels_xml_content, cylinder_index):
         rows = table.findall('ss:Row', NS)
         for row in rows:
             cells = row.findall('ss:Cell', NS)
-            if len(cells) > cylinder_index + 1 and cells[0].find('ss:Data', NS) is not None:
+            if len(cells) > cylinder_index and cells[0].find('ss:Data', NS) is not None:
                 cell_text = cells[0].find('ss:Data', NS).text
                 if cell_text and "DISCHARGE TEMPERATURE" in cell_text:
-                    temp_node = cells[cylinder_index + 1].find('ss:Data', NS)
+                    temp_node = cells[cylinder_index].find('ss:Data', NS)
                     if temp_node is not None and temp_node.text:
                         return f"{float(temp_node.text):.1f}°C"
     except (ValueError, IndexError):
@@ -218,7 +218,6 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         levels_root = ET.fromstring(_levels_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
 
-        # Helper to find a value in a worksheet
         def find_value(root, sheet_name, key_name, col_offset):
             ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
             if ws is None: return "N/A"
@@ -226,28 +225,28 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
             for row in rows:
                 cells = row.findall('ss:Cell', NS)
                 if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
-                    if cells[0].find('ss:Data', NS).text == key_name:
+                    cell_text = cells[0].find('ss:Data', NS).text
+                    if cell_text and key_name in cell_text:
                         value_node = cells[col_offset].find('ss:Data', NS)
-                        return value_node.text if value_node is not None else "N/A"
+                        return value_node.text if value_node is not None and value_node.text else "N/A"
             return "N/A"
 
-        # Extract data for the table
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
             'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2)] * 2,
             'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2)],
             'Pressure Ps/Pd (psig)': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index+1)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index+1)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}"
             ],
             'Temp Ts/Td': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index+1)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index+1)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index)}"
             ],
-            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index+1)] * 2,
+            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index)] * 2,
             'Indicated Power (ihp)': [
-                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index+1),
-                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index+1)
+                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index),
+                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index)
             ]
         }
         
@@ -257,6 +256,45 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
     except Exception as e:
         st.warning(f"Could not generate health report table: {e}")
         return pd.DataFrame()
+
+# --- New Cylinder Details Card Function ---
+def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylinders):
+    """Extracts key details for all cylinders for the summary cards."""
+    details = []
+    try:
+        source_root = ET.fromstring(_source_xml_content)
+        levels_root = ET.fromstring(_levels_xml_content)
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+
+        def find_value(root, sheet_name, key_name, col_offset):
+            ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
+            if ws is None: return "N/A"
+            rows = ws.findall('.//ss:Row', NS)
+            for row in rows:
+                cells = row.findall('ss:Cell', NS)
+                if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
+                    cell_text = cells[0].find('ss:Data', NS).text
+                    if cell_text and key_name in cell_text:
+                        value_node = cells[col_offset].find('ss:Data', NS)
+                        return value_node.text if value_node is not None and value_node.text else "N/A"
+            return "N/A"
+
+        for i in range(1, num_cylinders + 1):
+            detail = {
+                "name": f"Cylinder {i}",
+                "bore": find_value(source_root, 'Source', f'CYLINDER {i} BORE DIAMETER', 2),
+                "suction_temp": find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i),
+                "discharge_temp": find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i),
+                "suction_pressure": find_value(levels_root, 'Levels', 'SUCTION PRESSURE', i),
+                "discharge_pressure": find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i),
+                "flow_balance_ce": find_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i),
+                "flow_balance_he": find_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i)
+            }
+            details.append(detail)
+        return details
+    except Exception as e:
+        st.warning(f"Could not extract all cylinder details: {e}")
+        return []
 
 
 # --- Core Diagnostics & Plotting ---
@@ -345,6 +383,26 @@ st.markdown("""
         padding: 1rem !important;
     }
 }
+.detail-card {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+.detail-card h5 {
+    color: #007bff;
+    margin-bottom: 1rem;
+}
+.detail-item {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+}
+.detail-item span:first-child {
+    color: #6c757d;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -412,8 +470,29 @@ if uploaded_files and len(uploaded_files) == 3:
                 if not cylinders:
                     st.error("Could not automatically discover any valid cylinder configurations.")
                 else:
+                    # --- Display Cylinder Details Cards ---
+                    st.header("Cylinder Details")
+                    all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
+                    cols = st.columns(len(all_details))
+                    for i, detail in enumerate(all_details):
+                        with cols[i]:
+                            st.markdown(f"""
+                            <div class="detail-card">
+                                <h5>{detail['name']}</h5>
+                                <div class="detail-item"><span>BORE:</span> <strong>{detail['bore']}</strong></div>
+                                <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
+                                <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
+                                <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
+                                <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
+                                <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
+                                <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    
+                    st.markdown("---") # Divider
+
                     cylinder_names = [c.get("cylinder_name") for c in cylinders]
-                    selected_cylinder_name = st.sidebar.selectbox("Select Cylinder", cylinder_names, key="cylinder_selector")
+                    selected_cylinder_name = st.sidebar.selectbox("Select Cylinder for Detailed View", cylinder_names, key="cylinder_selector")
                     
                     selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
 
