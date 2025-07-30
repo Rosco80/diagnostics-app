@@ -62,6 +62,8 @@ def init_db():
 db_conn = init_db()
 if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
+if 'file_uploader_key' not in st.session_state:
+    st.session_state.file_uploader_key = 0
 
 
 # --- Helper Functions ---
@@ -253,10 +255,9 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
             ax2.fill_between(df['Crank Angle'], vibration_data.min(), vibration_data.max(), where=df[f'{curve_name}_anom'], color=colors[i], alpha=0.3, interpolate=True)
         current_offset += vertical_offset
 
-    # Plot saved valve events
     cursor = db_conn.cursor()
     for item in report_data:
-        if item['name'] != 'Pressure': # Only for valves
+        if item['name'] != 'Pressure':
             analysis_id = analysis_ids.get(item['name'])
             if analysis_id:
                 events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
@@ -267,7 +268,6 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
                     elif event_type == 'close':
                         ax1.axvline(x=crank_angle, color='r', linestyle='--', linewidth=2)
                         ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'C', color='r', fontsize=12, weight='bold')
-
 
     ax2.set_ylabel('Vibration (G) with Offset', color='blue', fontsize=14)
     ax2.tick_params(axis='y', labelcolor='blue')
@@ -283,6 +283,22 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide", page_title="Machine Diagnostics Analyzer")
+
+# --- PDF Print Styling ---
+st.markdown("""
+<style>
+@media print {
+    .stSidebar, .stToolbar, .stActionButton {
+        display: none !important;
+    }
+    .main .block-container {
+        padding: 1rem !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 st.title("⚙️ AI-Powered Machine Diagnostics Analyzer")
 st.markdown("Upload your machine's XML data files. The configuration will be discovered automatically.")
 
@@ -291,19 +307,26 @@ with st.sidebar:
     uploaded_files = st.file_uploader(
         "Upload Machine XML Data (Curves, Levels, Source)", 
         type=["xml"], 
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key=f"file_uploader_{st.session_state.file_uploader_key}"
     )
+    if st.button("Start New Analysis / Clear Files"):
+        st.session_state.file_uploader_key += 1
+        st.rerun()
+
     st.header("2. View Options")
     envelope_view = st.checkbox("Enable Envelope View", value=True)
     vertical_offset = st.slider("Vertical Offset", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
+    
     st.header("3. View All Saved Labels")
+    st.caption("Shows all labels saved from all past analysis sessions.")
     cursor = db_conn.cursor()
     machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
     machine_id_options = [row[0] for row in machine_ids]
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
     
     st.header("4. Export")
-    st.components.v1.html('<button onclick="window.print()">Print Report (PDF)</button>', height=40)
+    st.button("Print Report (PDF)", on_click=st.components.v1.html('<script>window.print()</script>'))
 
 
 # --- Main Application Logic ---
@@ -392,14 +415,14 @@ if uploaded_files and len(uploaded_files) == 3:
                                         st.write("") # Spacer
                                         st.write("") # Spacer
                                         if st.button("Save Events", key=f"btn_event_{analysis_id}"):
-                                            # Clear old events for this analysis_id before inserting new ones
                                             cursor.execute("DELETE FROM valve_events WHERE analysis_id = ?", (analysis_id,))
                                             if open_angle is not None:
                                                 cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'open', open_angle))
                                             if close_angle is not None:
                                                 cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'close', close_angle))
                                             db_conn.commit()
-                                            st.success(f"Events for {item['name']} saved. Chart will update on next interaction.")
+                                            st.success(f"Events for {item['name']} saved.")
+                                            st.rerun()
                         
                         st.header("📝 Diagnostic Summary")
                         cylinder_index = int(selected_cylinder_name.split(" ")[-1])
