@@ -49,8 +49,8 @@ def init_db():
     return conn
 
 # --- Session State Initialization ---
-if 'db_conn' not in st.session_state:
-    st.session_state.db_conn = init_db()
+# Establish connection for the current script run to ensure robustness on Streamlit Cloud
+db_conn = init_db()
 if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
 
@@ -254,7 +254,7 @@ with st.sidebar:
     
     # --- Analysis History ---
     st.header("3. Analysis History")
-    cursor = st.session_state.db_conn.cursor()
+    cursor = db_conn.cursor()
     sessions = cursor.execute("SELECT id, timestamp, machine_id FROM sessions ORDER BY timestamp DESC").fetchall()
     session_options = {f"{row[0]}: {row[2]} ({row[1]})": row[0] for row in sessions}
     selected_session_str = st.selectbox("Load a previous session", options=session_options.keys())
@@ -282,9 +282,9 @@ if uploaded_files and len(uploaded_files) == 3:
             # --- Save Session to DB ---
             rpm = extract_rpm(files_content['levels'])
             machine_id = discovered_config.get('machine_id', 'N/A')
-            cursor = st.session_state.db_conn.cursor()
+            cursor = db_conn.cursor()
             cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
-            st.session_state.db_conn.commit()
+            db_conn.commit()
             st.session_state.active_session_id = cursor.lastrowid
             st.info(f"New analysis session #{st.session_state.active_session_id} created.")
 
@@ -313,13 +313,12 @@ if uploaded_files and len(uploaded_files) == 3:
                         analysis_ids = {}
                         for item in report_data:
                             st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
-                            # Save analysis item to DB
                             cursor.execute(
                                 "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
                                 (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold'])
                             )
                             analysis_ids[item['name']] = cursor.lastrowid
-                        st.session_state.db_conn.commit()
+                        db_conn.commit()
 
                         # --- Anomaly Labeling UI ---
                         st.header("🏷️ Anomaly Labeling")
@@ -332,7 +331,7 @@ if uploaded_files and len(uploaded_files) == 3:
                                     if st.button(f"Save Label for {item['name']}", key=f"btn_{label_key}"):
                                         if user_label:
                                             cursor.execute("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", (analysis_id, user_label))
-                                            st.session_state.db_conn.commit()
+                                            db_conn.commit()
                                             st.success(f"Saved label for {item['name']}: '{user_label}'")
                                         else:
                                             st.warning("Please enter a label before saving.")
@@ -359,4 +358,3 @@ elif uploaded_files:
     st.sidebar.warning(f"Please upload all 3 required XML files. You have uploaded {len(uploaded_files)}.")
 else:
     st.info("Please upload all three required XML files (Curves, Levels, Source) to begin the analysis.")
-
