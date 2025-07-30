@@ -218,23 +218,25 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         levels_root = ET.fromstring(_levels_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
 
-        def find_value(root, sheet_name, key_name, col_offset):
+        def find_value(root, sheet_name, key_name, col_offset, is_source=False):
             ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
             if ws is None: return "N/A"
             rows = ws.findall('.//ss:Row', NS)
             for row in rows:
                 cells = row.findall('ss:Cell', NS)
-                if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
+                # Source.xml has a different structure (key, unit, value) vs Levels.xml (key, unit, val1, val2...)
+                data_col = col_offset if is_source else col_offset + 1
+                if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
                     cell_text = cells[0].find('ss:Data', NS).text
                     if cell_text and key_name in cell_text:
-                        value_node = cells[col_offset].find('ss:Data', NS)
+                        value_node = cells[data_col].find('ss:Data', NS)
                         return value_node.text if value_node is not None and value_node.text else "N/A"
             return "N/A"
 
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2)] * 2,
-            'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2)],
+            'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2, is_source=True)] * 2,
+            'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2, is_source=True)],
             'Pressure Ps/Pd (psig)': [
                 f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}",
                 f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index)}"
@@ -266,23 +268,24 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
         levels_root = ET.fromstring(_levels_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
 
-        def find_value(root, sheet_name, key_name, col_offset):
+        def find_value(root, sheet_name, key_name, col_offset, is_source=False):
             ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
             if ws is None: return "N/A"
             rows = ws.findall('.//ss:Row', NS)
             for row in rows:
                 cells = row.findall('ss:Cell', NS)
-                if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
+                data_col = col_offset if is_source else col_offset + 1
+                if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
                     cell_text = cells[0].find('ss:Data', NS).text
                     if cell_text and key_name in cell_text:
-                        value_node = cells[col_offset].find('ss:Data', NS)
+                        value_node = cells[data_col].find('ss:Data', NS)
                         return value_node.text if value_node is not None and value_node.text else "N/A"
             return "N/A"
 
         for i in range(1, num_cylinders + 1):
             detail = {
                 "name": f"Cylinder {i}",
-                "bore": find_value(source_root, 'Source', f'CYLINDER {i} BORE DIAMETER', 2),
+                "bore": find_value(source_root, 'Source', f'CYLINDER {i} BORE DIAMETER', 2, is_source=True),
                 "suction_temp": find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i),
                 "discharge_temp": find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i),
                 "suction_pressure": find_value(levels_root, 'Levels', 'SUCTION PRESSURE', i),
@@ -470,27 +473,6 @@ if uploaded_files and len(uploaded_files) == 3:
                 if not cylinders:
                     st.error("Could not automatically discover any valid cylinder configurations.")
                 else:
-                    # --- Display Cylinder Details Cards ---
-                    st.header("Cylinder Details")
-                    all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
-                    cols = st.columns(len(all_details))
-                    for i, detail in enumerate(all_details):
-                        with cols[i]:
-                            st.markdown(f"""
-                            <div class="detail-card">
-                                <h5>{detail['name']}</h5>
-                                <div class="detail-item"><span>BORE:</span> <strong>{detail['bore']}</strong></div>
-                                <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
-                                <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
-                                <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
-                                <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
-                                <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
-                                <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    
-                    st.markdown("---") # Divider
-
                     cylinder_names = [c.get("cylinder_name") for c in cylinders]
                     selected_cylinder_name = st.sidebar.selectbox("Select Cylinder for Detailed View", cylinder_names, key="cylinder_selector")
                     
@@ -514,7 +496,6 @@ if uploaded_files and len(uploaded_files) == 3:
                         
                         st.header("🏷️ Anomaly Labeling")
                         with st.expander("Add labels to detected anomalies and valve events"):
-                            # ... (labeling UI remains the same)
                             st.subheader("Fault Labels")
                             for item in report_data:
                                 if item['count'] > 0:
@@ -562,11 +543,28 @@ if uploaded_files and len(uploaded_files) == 3:
                         for item in report_data:
                             st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
 
-                        # --- New Health Report Table Display ---
                         st.header("Compressor Health Report")
                         health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
                         if not health_report_df.empty:
                             st.dataframe(health_report_df)
+                        
+                        st.header("Cylinder Details")
+                        all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
+                        cols = st.columns(len(all_details) if all_details else 1)
+                        for i, detail in enumerate(all_details):
+                            with cols[i]:
+                                st.markdown(f"""
+                                <div class="detail-card">
+                                    <h5>{detail['name']}</h5>
+                                    <div class="detail-item"><span>BORE:</span> <strong>{detail['bore']}</strong></div>
+                                    <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
+                                    <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
+                                    <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
+                                    <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
+                                    <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
+                                    <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
+                                </div>
+                                """, unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"An error occurred during processing. Please check the files. Details: {e}")
