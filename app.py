@@ -64,6 +64,8 @@ if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
 if 'file_uploader_key' not in st.session_state:
     st.session_state.file_uploader_key = 0
+if 'print_report' not in st.session_state:
+    st.session_state.print_report = False
 
 
 # --- Helper Functions ---
@@ -374,7 +376,8 @@ with st.sidebar:
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
     
     st.header("4. Export")
-    st.button("Print Report (PDF)", on_click=lambda: st.components.v1.html('<script>window.print()</script>'))
+    if st.button("Print Report (PDF)"):
+        st.session_state.print_report = True
 
 
 # --- Main Application Logic ---
@@ -516,3 +519,8 @@ if all_labels:
         file_name="all_anomaly_labels.json",
         mime="application/json"
     )
+
+# --- Trigger Print Action ---
+if st.session_state.print_report:
+    st.components.v1.html('<script>window.print()</script>')
+    st.session_state.print_report = False
