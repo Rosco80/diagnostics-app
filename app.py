@@ -118,35 +118,13 @@ def extract_rpm(_levels_xml_content):
         for row in rows:
             cells = row.findall('ss:Cell', NS)
             if cells and cells[0].find('ss:Data', NS) is not None:
-                cell_text = cells[0].find('ss:Data', NS).text
-                if cell_text and "RPM" in cell_text:
+                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
+                if "RPM" in cell_text and "RATED" not in cell_text:
                     for cell in cells[1:]:
                          data_node = cell.find('ss:Data', NS)
                          if data_node is not None and data_node.text:
                              return f"{float(data_node.text):.0f}"
     except Exception:
-        return "N/A"
-    return "N/A"
-
-def extract_temperature(_levels_xml_content, cylinder_index):
-    """Extracts discharge temperature for a specific cylinder index."""
-    try:
-        root = ET.fromstring(_levels_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
-        if ws_levels is None: return "N/A"
-        
-        table = ws_levels.find('.//ss:Table', NS)
-        rows = table.findall('ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            if len(cells) > cylinder_index and cells[0].find('ss:Data', NS) is not None:
-                cell_text = cells[0].find('ss:Data', NS).text
-                if cell_text and "DISCHARGE TEMPERATURE" in cell_text:
-                    temp_node = cells[cylinder_index].find('ss:Data', NS)
-                    if temp_node is not None and temp_node.text:
-                        return f"{float(temp_node.text):.1f}°C"
-    except (ValueError, IndexError):
         return "N/A"
     return "N/A"
 
@@ -166,15 +144,15 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         for row in rows:
             cells = row.findall('ss:Cell', NS)
             if len(cells) > 1 and cells[0].find('ss:Data', NS) is not None:
-                key = cells[0].find('ss:Data', NS).text
+                key = (cells[0].find('ss:Data', NS).text or "").strip()
                 if key == "Machine":
                     machine_id = cells[1].find('ss:Data', NS).text
                 elif key == "COMPRESSOR NUMBER OF CYLINDERS":
                     num_cylinders = int(cells[2].find('ss:Data', NS).text)
         
         if num_cylinders == 0:
-            st.warning("Could not determine number of cylinders from Source.xml. Defaulting to 1.")
-            num_cylinders = 1
+            st.warning("Could not determine number of cylinders from Source.xml.")
+            return None
 
         curves_root = ET.fromstring(_curves_xml_content)
         ws_curves = next((ws for ws in curves_root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Curves'), None)
@@ -210,44 +188,51 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
 
-# --- New Health Report Table Function ---
+# --- New, Robust Data Extraction Functions ---
+def find_xml_value(root, sheet_name, key_name, col_offset):
+    """Robustly finds a value in a worksheet by row label and column index."""
+    try:
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+        ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
+        if ws is None: return "N/A"
+        
+        rows = ws.findall('.//ss:Row', NS)
+        for row in rows:
+            cells = row.findall('ss:Cell', NS)
+            if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
+                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
+                if cell_text == key_name:
+                    value_node = cells[col_offset].find('ss:Data', NS)
+                    return value_node.text if value_node is not None and value_node.text else "N/A"
+        return "N/A"
+    except Exception:
+        return "N/A"
+
 def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
-    """Generates a DataFrame for the health report table."""
+    """Generates a DataFrame for the health report table using robust parsing."""
     try:
         source_root = ET.fromstring(_source_xml_content)
         levels_root = ET.fromstring(_levels_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-
-        def find_value(root, sheet_name, key_name, col_offset, is_source=False):
-            ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-            if ws is None: return "N/A"
-            rows = ws.findall('.//ss:Row', NS)
-            for row in rows:
-                cells = row.findall('ss:Cell', NS)
-                data_col = 2 if is_source else col_offset
-                if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
-                    cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                    if cell_text == key_name:
-                        value_node = cells[data_col].find('ss:Data', NS)
-                        return value_node.text if value_node is not None and value_node.text else "N/A"
-            return "N/A"
-
+        
+        # In Source.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
+        # In Levels.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
+        
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2, is_source=True)] * 2,
-            'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2, is_source=True)],
+            'Bore (ins)': [find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', cylinder_index + 1)] * 2,
+            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER PISTON ROD DIAMETER', cylinder_index + 1)],
             'Pressure Ps/Pd (psig)': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
             ],
             'Temp Ts/Td': [
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
-                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
             ],
-            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
+            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
             'Indicated Power (ihp)': [
-                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
-                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
+                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
+                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
             ]
         }
         
@@ -258,39 +243,23 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         st.warning(f"Could not generate health report table: {e}")
         return pd.DataFrame()
 
-# --- New Cylinder Details Card Function ---
 def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylinders):
     """Extracts key details for all cylinders for the summary cards."""
     details = []
     try:
         source_root = ET.fromstring(_source_xml_content)
         levels_root = ET.fromstring(_levels_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-
-        def find_value(root, sheet_name, key_name, col_offset, is_source=False):
-            ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-            if ws is None: return "N/A"
-            rows = ws.findall('.//ss:Row', NS)
-            for row in rows:
-                cells = row.findall('ss:Cell', NS)
-                data_col = 2 if is_source else col_offset
-                if len(cells) > data_col and cells[0].find('ss:Data', NS) is not None:
-                    cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                    if cell_text == key_name:
-                        value_node = cells[data_col].find('ss:Data', NS)
-                        return value_node.text if value_node is not None and value_node.text else "N/A"
-            return "N/A"
 
         for i in range(1, num_cylinders + 1):
             detail = {
                 "name": f"Cylinder {i}",
-                "bore": find_value(source_root, 'Source', f'CYLINDER {i} BORE DIAMETER', 2, is_source=True),
-                "suction_temp": find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i + 1),
-                "discharge_temp": find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i + 1),
-                "suction_pressure": find_value(levels_root, 'Levels', 'SUCTION PRESSURE', i + 1),
-                "discharge_pressure": find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i + 1),
-                "flow_balance_ce": find_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i + 1),
-                "flow_balance_he": find_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i + 1)
+                "bore": find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', i + 1),
+                "suction_temp": find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i + 1),
+                "discharge_temp": find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i + 1),
+                "suction_pressure": find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', i + 1),
+                "discharge_pressure": find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i + 1),
+                "flow_balance_ce": find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i + 1),
+                "flow_balance_he": find_xml_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i + 1)
             }
             details.append(detail)
         return details
