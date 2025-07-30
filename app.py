@@ -45,11 +45,20 @@ def init_db():
             FOREIGN KEY (analysis_id) REFERENCES analyses (id)
         )
     ''')
+    # New table for valve open/close events
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS valve_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            analysis_id INTEGER,
+            event_type TEXT, -- "open" or "close"
+            crank_angle REAL,
+            FOREIGN KEY (analysis_id) REFERENCES analyses (id)
+        )
+    ''')
     conn.commit()
     return conn
 
 # --- Session State Initialization ---
-# Establish connection for the current script run to ensure robustness on Streamlit Cloud
 db_conn = init_db()
 if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
@@ -59,9 +68,7 @@ if 'active_session_id' not in st.session_state:
 
 @st.cache_data
 def load_all_curves_data(_curves_xml_content):
-    """
-    Parses the entire Curves.xml file once and caches the resulting DataFrame.
-    """
+    # ... (No changes)
     try:
         root = ET.fromstring(_curves_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
@@ -93,7 +100,7 @@ def load_all_curves_data(_curves_xml_content):
 
 
 def extract_rpm(_levels_xml_content):
-    """Extract machine RPM from the Levels.xml file."""
+    # ... (No changes)
     try:
         root = ET.fromstring(_levels_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
@@ -117,9 +124,7 @@ def extract_rpm(_levels_xml_content):
 
 @st.cache_data
 def auto_discover_configuration(_source_xml_content, _curves_xml_content):
-    """
-    Automatically discovers the machine configuration from the XML files.
-    """
+    # ... (No changes)
     try:
         source_root = ET.fromstring(_source_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
@@ -177,7 +182,7 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
 
 # --- Core Diagnostics & Plotting ---
 
-def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset):
+def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, analysis_ids):
     pressure_curve = cylinder_config.get('pressure_curve')
     valve_curves = cylinder_config.get('valve_vibration_curves', [])
 
@@ -196,7 +201,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset):
         report_data.append({"name": vc['name'], "curve_name": curve_name, "threshold": vib_thresh, "count": df[f'{curve_name}_anom'].sum(), "unit": "G"})
 
     fig, ax1 = plt.subplots(figsize=(16, 9))
-    plt.style.use('ggplot') # Using a more compatible style
+    plt.style.use('ggplot')
 
     ax1.plot(df['Crank Angle'], df[pressure_curve], color='black', label='Pressure (PSI)', linewidth=2)
     ax1.fill_between(df['Crank Angle'], df[pressure_curve].min(), df[pressure_curve].max(), where=df[f'{pressure_curve}_anom'], color='gray', alpha=0.4, interpolate=True, label='Pressure Anomaly')
@@ -222,6 +227,22 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset):
             ax2.fill_between(df['Crank Angle'], vibration_data.min(), vibration_data.max(), where=df[f'{curve_name}_anom'], color=colors[i], alpha=0.3, interpolate=True)
         current_offset += vertical_offset
 
+    # Plot saved valve events
+    cursor = db_conn.cursor()
+    for item in report_data:
+        if item['name'] != 'Pressure': # Only for valves
+            analysis_id = analysis_ids.get(item['name'])
+            if analysis_id:
+                events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
+                for event_type, crank_angle in events:
+                    if event_type == 'open':
+                        ax1.axvline(x=crank_angle, color='g', linestyle='--', linewidth=2)
+                        ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'O', color='g', fontsize=12, weight='bold')
+                    elif event_type == 'close':
+                        ax1.axvline(x=crank_angle, color='r', linestyle='--', linewidth=2)
+                        ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'C', color='r', fontsize=12, weight='bold')
+
+
     ax2.set_ylabel('Vibration (G) with Offset', color='blue', fontsize=14)
     ax2.tick_params(axis='y', labelcolor='blue')
     ax2.grid(False)
@@ -239,7 +260,6 @@ st.set_page_config(layout="wide", page_title="Machine Diagnostics Analyzer")
 st.title("⚙️ AI-Powered Machine Diagnostics Analyzer")
 st.markdown("Upload your machine's XML data files. The configuration will be discovered automatically.")
 
-# --- Sidebar ---
 with st.sidebar:
     st.header("1. Upload Data Files")
     uploaded_files = st.file_uploader(
@@ -247,18 +267,14 @@ with st.sidebar:
         type=["xml"], 
         accept_multiple_files=True
     )
-    
     st.header("2. View Options")
     envelope_view = st.checkbox("Enable Envelope View", value=True)
     vertical_offset = st.slider("Vertical Offset", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
-    
-    # --- Analysis History ---
     st.header("3. Analysis History")
     cursor = db_conn.cursor()
     sessions = cursor.execute("SELECT id, timestamp, machine_id FROM sessions ORDER BY timestamp DESC").fetchall()
     session_options = {f"{row[0]}: {row[2]} ({row[1]})": row[0] for row in sessions}
     selected_session_str = st.selectbox("Load a previous session", options=session_options.keys())
-
 
 # --- Main Application Logic ---
 if uploaded_files and len(uploaded_files) == 3:
@@ -279,7 +295,6 @@ if uploaded_files and len(uploaded_files) == 3:
             discovered_config = auto_discover_configuration(files_content['source'], files_content['curves'])
             df, all_curve_names = load_all_curves_data(files_content['curves'])
             
-            # --- Save Session to DB ---
             rpm = extract_rpm(files_content['levels'])
             machine_id = discovered_config.get('machine_id', 'N/A')
             cursor = db_conn.cursor()
@@ -288,7 +303,6 @@ if uploaded_files and len(uploaded_files) == 3:
             st.session_state.active_session_id = cursor.lastrowid
             st.info(f"New analysis session #{st.session_state.active_session_id} created.")
 
-
             if df is not None and discovered_config:
                 cylinders = discovered_config.get("cylinders", [])
                 if not cylinders:
@@ -296,33 +310,32 @@ if uploaded_files and len(uploaded_files) == 3:
                 else:
                     cylinder_names = [c.get("cylinder_name") for c in cylinders]
                     selected_cylinder_name = st.sidebar.selectbox("Select Cylinder", cylinder_names, key="cylinder_selector")
+                    
+                    # Store analysis results in DB and get their IDs
+                    analysis_ids = {}
+                    temp_report_data = [] # Calculate once before plotting
                     selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
 
                     if selected_cylinder_config:
-                        with st.spinner(f'Analyzing {selected_cylinder_name}...'):
-                            fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset)
+                        # Perform analysis to get report data first
+                        _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
+                        
+                        for item in temp_report_data:
+                            cursor.execute( "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
+                                (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
+                            analysis_ids[item['name']] = cursor.lastrowid
+                        db_conn.commit()
+
+                        # Now generate the final view with the correct analysis IDs for plotting events
+                        fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
                         
                         st.header(f"📊 Diagnostic Chart for {selected_cylinder_name}")
                         st.pyplot(fig)
                         
-                        st.header("📝 Diagnostic Summary")
-                        st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm}")
-                        st.markdown(f"**Data Points Analyzed:** {len(df)}")
-                        st.markdown("--- \n ### Anomaly Summary")
-                        
-                        analysis_ids = {}
-                        for item in report_data:
-                            st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
-                            cursor.execute(
-                                "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
-                                (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold'])
-                            )
-                            analysis_ids[item['name']] = cursor.lastrowid
-                        db_conn.commit()
-
                         # --- Anomaly Labeling UI ---
                         st.header("🏷️ Anomaly Labeling")
-                        with st.expander("Add labels to detected anomalies"):
+                        with st.expander("Add labels to detected anomalies and valve events"):
+                            st.subheader("Fault Labels")
                             for item in report_data:
                                 if item['count'] > 0:
                                     analysis_id = analysis_ids[item['name']]
@@ -335,6 +348,34 @@ if uploaded_files and len(uploaded_files) == 3:
                                             st.success(f"Saved label for {item['name']}: '{user_label}'")
                                         else:
                                             st.warning("Please enter a label before saving.")
+                            
+                            st.subheader("Mark Valve Open/Close Events")
+                            for item in report_data:
+                                if item['name'] != 'Pressure': # Only for valves
+                                    analysis_id = analysis_ids[item['name']]
+                                    cols = st.columns([3, 2, 2, 2])
+                                    with cols[0]:
+                                        st.write(f"**{item['name']}:**")
+                                    with cols[1]:
+                                        open_angle = st.number_input("Open Angle", key=f"open_{analysis_id}", value=None, format="%f")
+                                    with cols[2]:
+                                        close_angle = st.number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%f")
+                                    with cols[3]:
+                                        if st.button("Save Events", key=f"btn_event_{analysis_id}"):
+                                            if open_angle is not None:
+                                                cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'open', open_angle))
+                                            if close_angle is not None:
+                                                cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'close', close_angle))
+                                            db_conn.commit()
+                                            st.success(f"Events for {item['name']} saved. The chart will update on the next run.")
+                        
+                        # --- Diagnostic Summary ---
+                        st.header("📝 Diagnostic Summary")
+                        st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm}")
+                        st.markdown(f"**Data Points Analyzed:** {len(df)}")
+                        st.markdown("--- \n ### Anomaly Summary")
+                        for item in report_data:
+                            st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
                         
                         # --- Display and Export ALL Labels from DB ---
                         all_labels = cursor.execute("SELECT s.timestamp, s.machine_id, a.cylinder_name, a.curve_name, l.label_text FROM labels l JOIN analyses a ON l.analysis_id = a.id JOIN sessions s ON a.session_id = s.id").fetchall()
