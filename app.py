@@ -208,6 +208,55 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
 
+# --- New Health Report Table Function ---
+def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
+    """Generates a DataFrame for the health report table."""
+    try:
+        source_root = ET.fromstring(_source_xml_content)
+        levels_root = ET.fromstring(_levels_xml_content)
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+
+        # Helper to find a value in a worksheet
+        def find_value(root, sheet_name, key_name, col_offset):
+            ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
+            if ws is None: return "N/A"
+            rows = ws.findall('.//ss:Row', NS)
+            for row in rows:
+                cells = row.findall('ss:Cell', NS)
+                if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
+                    if cells[0].find('ss:Data', NS).text == key_name:
+                        value_node = cells[col_offset].find('ss:Data', NS)
+                        return value_node.text if value_node is not None else "N/A"
+            return "N/A"
+
+        # Extract data for the table
+        data = {
+            'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
+            'Bore (ins)': [find_value(source_root, 'Source', f'CYLINDER {cylinder_index} BORE DIAMETER', 2)] * 2,
+            'Rod Diam (ins)': ['N/A', find_value(source_root, 'Source', f'CYLINDER {cylinder_index} PISTON ROD DIAMETER', 2)],
+            'Pressure Ps/Pd (psig)': [
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index+1)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index+1)}"
+            ],
+            'Temp Ts/Td': [
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index+1)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index+1)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index+1)}"
+            ],
+            'Comp. Ratio': [find_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index+1)] * 2,
+            'Indicated Power (ihp)': [
+                find_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index+1),
+                find_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index+1)
+            ]
+        }
+        
+        df_table = pd.DataFrame(data)
+        return df_table
+
+    except Exception as e:
+        st.warning(f"Could not generate health report table: {e}")
+        return pd.DataFrame()
+
+
 # --- Core Diagnostics & Plotting ---
 
 def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, analysis_ids):
@@ -284,7 +333,6 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide", page_title="Machine Diagnostics Analyzer")
 
-# --- PDF Print Styling ---
 st.markdown("""
 <style>
 @media print {
@@ -326,7 +374,7 @@ with st.sidebar:
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
     
     st.header("4. Export")
-    st.button("Print Report (PDF)", on_click=st.components.v1.html('<script>window.print()</script>'))
+    st.button("Print Report (PDF)", on_click=lambda: st.components.v1.html('<script>window.print()</script>'))
 
 
 # --- Main Application Logic ---
@@ -370,7 +418,6 @@ if uploaded_files and len(uploaded_files) == 3:
                         # Perform analysis once to get report data
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
-                        # Save analysis results to DB and get their IDs
                         analysis_ids = {}
                         for item in temp_report_data:
                             cursor.execute( "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
@@ -378,7 +425,6 @@ if uploaded_files and len(uploaded_files) == 3:
                             analysis_ids[item['name']] = cursor.lastrowid
                         db_conn.commit()
 
-                        # Now generate the final view with the correct analysis IDs for plotting events
                         fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
                         
                         st.header(f"📊 Diagnostic Chart for {selected_cylinder_name}")
@@ -386,6 +432,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         
                         st.header("🏷️ Anomaly Labeling")
                         with st.expander("Add labels to detected anomalies and valve events"):
+                            # ... (labeling UI remains the same)
                             st.subheader("Fault Labels")
                             for item in report_data:
                                 if item['count'] > 0:
@@ -412,8 +459,8 @@ if uploaded_files and len(uploaded_files) == 3:
                                     with cols[2]:
                                         close_angle = st.number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%f")
                                     with cols[3]:
-                                        st.write("") # Spacer
-                                        st.write("") # Spacer
+                                        st.write("") 
+                                        st.write("") 
                                         if st.button("Save Events", key=f"btn_event_{analysis_id}"):
                                             cursor.execute("DELETE FROM valve_events WHERE analysis_id = ?", (analysis_id,))
                                             if open_angle is not None:
@@ -423,16 +470,22 @@ if uploaded_files and len(uploaded_files) == 3:
                                             db_conn.commit()
                                             st.success(f"Events for {item['name']} saved.")
                                             st.rerun()
-                        
+
                         st.header("📝 Diagnostic Summary")
-                        cylinder_index = int(selected_cylinder_name.split(" ")[-1])
+                        cylinder_index = int(re.search(r'\d+', selected_cylinder_name).group())
                         discharge_temp = extract_temperature(files_content['levels'], cylinder_index)
                         st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm} | **Discharge Temp:** {discharge_temp}")
                         st.markdown(f"**Data Points Analyzed:** {len(df)}")
                         st.markdown("--- \n ### Anomaly Summary")
                         for item in report_data:
                             st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
-                        
+
+                        # --- New Health Report Table Display ---
+                        st.header("Compressor Health Report")
+                        health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
+                        if not health_report_df.empty:
+                            st.dataframe(health_report_df)
+
         except Exception as e:
             st.error(f"An error occurred during processing. Please check the files. Details: {e}")
     else:
