@@ -196,7 +196,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset):
         report_data.append({"name": vc['name'], "curve_name": curve_name, "threshold": vib_thresh, "count": df[f'{curve_name}_anom'].sum(), "unit": "G"})
 
     fig, ax1 = plt.subplots(figsize=(16, 9))
-    plt.style.use('seaborn-darkgrid')
+    plt.style.use('ggplot') # Using a more compatible style
 
     ax1.plot(df['Crank Angle'], df[pressure_curve], color='black', label='Pressure (PSI)', linewidth=2)
     ax1.fill_between(df['Crank Angle'], df[pressure_curve].min(), df[pressure_curve].max(), where=df[f'{pressure_curve}_anom'], color='gray', alpha=0.4, interpolate=True, label='Pressure Anomaly')
