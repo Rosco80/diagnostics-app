@@ -62,10 +62,6 @@ def init_db():
 db_conn = init_db()
 if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
-if 'file_uploader_key' not in st.session_state:
-    st.session_state.file_uploader_key = 0
-if 'print_report' not in st.session_state:
-    st.session_state.print_report = False
 
 
 # --- Helper Functions ---
@@ -118,13 +114,35 @@ def extract_rpm(_levels_xml_content):
         for row in rows:
             cells = row.findall('ss:Cell', NS)
             if cells and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                if "RPM" in cell_text and "RATED" not in cell_text:
+                cell_text = cells[0].find('ss:Data', NS).text
+                if cell_text and "RPM" in cell_text:
                     for cell in cells[1:]:
                          data_node = cell.find('ss:Data', NS)
                          if data_node is not None and data_node.text:
                              return f"{float(data_node.text):.0f}"
     except Exception:
+        return "N/A"
+    return "N/A"
+
+def extract_temperature(_levels_xml_content, cylinder_index):
+    """Extracts discharge temperature for a specific cylinder index."""
+    try:
+        root = ET.fromstring(_levels_xml_content)
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
+        if ws_levels is None: return "N/A"
+        
+        table = ws_levels.find('.//ss:Table', NS)
+        rows = table.findall('ss:Row', NS)
+        for row in rows:
+            cells = row.findall('ss:Cell', NS)
+            if len(cells) > cylinder_index + 1 and cells[0].find('ss:Data', NS) is not None:
+                cell_text = cells[0].find('ss:Data', NS).text
+                if cell_text and "DISCHARGE TEMPERATURE" in cell_text:
+                    temp_node = cells[cylinder_index + 1].find('ss:Data', NS)
+                    if temp_node is not None and temp_node.text:
+                        return f"{float(temp_node.text):.1f}°C"
+    except (ValueError, IndexError):
         return "N/A"
     return "N/A"
 
@@ -144,15 +162,15 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         for row in rows:
             cells = row.findall('ss:Cell', NS)
             if len(cells) > 1 and cells[0].find('ss:Data', NS) is not None:
-                key = (cells[0].find('ss:Data', NS).text or "").strip()
+                key = cells[0].find('ss:Data', NS).text
                 if key == "Machine":
                     machine_id = cells[1].find('ss:Data', NS).text
                 elif key == "COMPRESSOR NUMBER OF CYLINDERS":
                     num_cylinders = int(cells[2].find('ss:Data', NS).text)
         
         if num_cylinders == 0:
-            st.warning("Could not determine number of cylinders from Source.xml.")
-            return None
+            st.warning("Could not determine number of cylinders from Source.xml. Defaulting to 1.")
+            num_cylinders = 1
 
         curves_root = ET.fromstring(_curves_xml_content)
         ws_curves = next((ws for ws in curves_root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Curves'), None)
@@ -187,86 +205,6 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
     except Exception as e:
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
-
-# --- New, Robust Data Extraction Functions ---
-def find_xml_value(root, sheet_name, key_name, col_offset):
-    """Robustly finds a value in a worksheet by row label and column index."""
-    try:
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-        ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-        if ws is None: return "N/A"
-        
-        rows = ws.findall('.//ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                if cell_text == key_name:
-                    value_node = cells[col_offset].find('ss:Data', NS)
-                    return value_node.text if value_node is not None and value_node.text else "N/A"
-        return "N/A"
-    except Exception:
-        return "N/A"
-
-def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
-    """Generates a DataFrame for the health report table using robust parsing."""
-    try:
-        source_root = ET.fromstring(_source_xml_content)
-        levels_root = ET.fromstring(_levels_xml_content)
-        
-        # In Source.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
-        # In Levels.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
-        
-        data = {
-            'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', cylinder_index + 1)] * 2,
-            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER PISTON ROD DIAMETER', cylinder_index + 1)],
-            'Pressure Ps/Pd (psig)': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
-            ],
-            'Temp Ts/Td': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
-            ],
-            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
-            'Indicated Power (ihp)': [
-                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
-                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
-            ]
-        }
-        
-        df_table = pd.DataFrame(data)
-        return df_table
-
-    except Exception as e:
-        st.warning(f"Could not generate health report table: {e}")
-        return pd.DataFrame()
-
-def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylinders):
-    """Extracts key details for all cylinders for the summary cards."""
-    details = []
-    try:
-        source_root = ET.fromstring(_source_xml_content)
-        levels_root = ET.fromstring(_levels_xml_content)
-
-        for i in range(1, num_cylinders + 1):
-            detail = {
-                "name": f"Cylinder {i}",
-                "bore": find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', i + 1),
-                "suction_temp": find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i + 1),
-                "discharge_temp": find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i + 1),
-                "suction_pressure": find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', i + 1),
-                "discharge_pressure": find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i + 1),
-                "flow_balance_ce": find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i + 1),
-                "flow_balance_he": find_xml_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i + 1)
-            }
-            details.append(detail)
-        return details
-    except Exception as e:
-        st.warning(f"Could not extract all cylinder details: {e}")
-        return []
-
 
 # --- Core Diagnostics & Plotting ---
 
@@ -315,9 +253,10 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
             ax2.fill_between(df['Crank Angle'], vibration_data.min(), vibration_data.max(), where=df[f'{curve_name}_anom'], color=colors[i], alpha=0.3, interpolate=True)
         current_offset += vertical_offset
 
+    # Plot saved valve events
     cursor = db_conn.cursor()
     for item in report_data:
-        if item['name'] != 'Pressure':
+        if item['name'] != 'Pressure': # Only for valves
             analysis_id = analysis_ids.get(item['name'])
             if analysis_id:
                 events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
@@ -328,6 +267,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
                     elif event_type == 'close':
                         ax1.axvline(x=crank_angle, color='r', linestyle='--', linewidth=2)
                         ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'C', color='r', fontsize=12, weight='bold')
+
 
     ax2.set_ylabel('Vibration (G) with Offset', color='blue', fontsize=14)
     ax2.tick_params(axis='y', labelcolor='blue')
@@ -343,41 +283,6 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide", page_title="Machine Diagnostics Analyzer")
-
-st.markdown("""
-<style>
-@media print {
-    .stSidebar, .stToolbar, .stActionButton {
-        display: none !important;
-    }
-    .main .block-container {
-        padding: 1rem !important;
-    }
-}
-.detail-card {
-    background-color: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 0.5rem;
-    padding: 1rem;
-    margin-bottom: 1rem;
-}
-.detail-card h5 {
-    color: #007bff;
-    margin-bottom: 1rem;
-}
-.detail-item {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-    font-size: 0.9rem;
-}
-.detail-item span:first-child {
-    color: #6c757d;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
 st.title("⚙️ AI-Powered Machine Diagnostics Analyzer")
 st.markdown("Upload your machine's XML data files. The configuration will be discovered automatically.")
 
@@ -386,27 +291,19 @@ with st.sidebar:
     uploaded_files = st.file_uploader(
         "Upload Machine XML Data (Curves, Levels, Source)", 
         type=["xml"], 
-        accept_multiple_files=True,
-        key=f"file_uploader_{st.session_state.file_uploader_key}"
+        accept_multiple_files=True
     )
-    if st.button("Start New Analysis / Clear Files"):
-        st.session_state.file_uploader_key += 1
-        st.rerun()
-
     st.header("2. View Options")
     envelope_view = st.checkbox("Enable Envelope View", value=True)
     vertical_offset = st.slider("Vertical Offset", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
-    
     st.header("3. View All Saved Labels")
-    st.caption("Shows all labels saved from all past analysis sessions.")
     cursor = db_conn.cursor()
     machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
     machine_id_options = [row[0] for row in machine_ids]
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
     
     st.header("4. Export")
-    if st.button("Print Report (PDF)"):
-        st.session_state.print_report = True
+    st.components.v1.html('<button onclick="window.print()">Print Report (PDF)</button>', height=40)
 
 
 # --- Main Application Logic ---
@@ -442,7 +339,7 @@ if uploaded_files and len(uploaded_files) == 3:
                     st.error("Could not automatically discover any valid cylinder configurations.")
                 else:
                     cylinder_names = [c.get("cylinder_name") for c in cylinders]
-                    selected_cylinder_name = st.sidebar.selectbox("Select Cylinder for Detailed View", cylinder_names, key="cylinder_selector")
+                    selected_cylinder_name = st.sidebar.selectbox("Select Cylinder", cylinder_names, key="cylinder_selector")
                     
                     selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
 
@@ -450,6 +347,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         # Perform analysis once to get report data
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
+                        # Save analysis results to DB and get their IDs
                         analysis_ids = {}
                         for item in temp_report_data:
                             cursor.execute( "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
@@ -457,6 +355,7 @@ if uploaded_files and len(uploaded_files) == 3:
                             analysis_ids[item['name']] = cursor.lastrowid
                         db_conn.commit()
 
+                        # Now generate the final view with the correct analysis IDs for plotting events
                         fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
                         
                         st.header(f"📊 Diagnostic Chart for {selected_cylinder_name}")
@@ -464,7 +363,6 @@ if uploaded_files and len(uploaded_files) == 3:
                         
                         st.header("🏷️ Anomaly Labeling")
                         with st.expander("Add labels to detected anomalies and valve events"):
-                            # ... (labeling UI remains the same)
                             st.subheader("Fault Labels")
                             for item in report_data:
                                 if item['count'] > 0:
@@ -491,50 +389,27 @@ if uploaded_files and len(uploaded_files) == 3:
                                     with cols[2]:
                                         close_angle = st.number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%f")
                                     with cols[3]:
-                                        st.write("") 
-                                        st.write("") 
+                                        st.write("") # Spacer
+                                        st.write("") # Spacer
                                         if st.button("Save Events", key=f"btn_event_{analysis_id}"):
+                                            # Clear old events for this analysis_id before inserting new ones
                                             cursor.execute("DELETE FROM valve_events WHERE analysis_id = ?", (analysis_id,))
                                             if open_angle is not None:
                                                 cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'open', open_angle))
                                             if close_angle is not None:
                                                 cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'close', close_angle))
                                             db_conn.commit()
-                                            st.success(f"Events for {item['name']} saved.")
-                                            st.rerun()
-
+                                            st.success(f"Events for {item['name']} saved. Chart will update on next interaction.")
+                        
                         st.header("📝 Diagnostic Summary")
-                        cylinder_index = int(re.search(r'\d+', selected_cylinder_name).group())
+                        cylinder_index = int(selected_cylinder_name.split(" ")[-1])
                         discharge_temp = extract_temperature(files_content['levels'], cylinder_index)
                         st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm} | **Discharge Temp:** {discharge_temp}")
                         st.markdown(f"**Data Points Analyzed:** {len(df)}")
                         st.markdown("--- \n ### Anomaly Summary")
                         for item in report_data:
                             st.markdown(f"- **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
-
-                        st.header("Compressor Health Report")
-                        health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
-                        if not health_report_df.empty:
-                            st.dataframe(health_report_df)
                         
-                        st.header("Cylinder Details")
-                        all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
-                        cols = st.columns(len(all_details) if all_details else 1)
-                        for i, detail in enumerate(all_details):
-                            with cols[i]:
-                                st.markdown(f"""
-                                <div class="detail-card">
-                                    <h5>{detail['name']}</h5>
-                                    <div class="detail-item"><span>BORE:</span> <strong>{detail['bore']}</strong></div>
-                                    <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
-                                    <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
-                                    <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
-                                    <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
-                                    <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
-                                    <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
-                                </div>
-                                """, unsafe_allow_html=True)
-
         except Exception as e:
             st.error(f"An error occurred during processing. Please check the files. Details: {e}")
     else:
@@ -565,8 +440,3 @@ if all_labels:
         file_name="all_anomaly_labels.json",
         mime="application/json"
     )
-
-# --- Trigger Print Action ---
-if st.session_state.print_report:
-    st.components.v1.html('<script>window.print()</script>')
-    st.session_state.print_report = False
