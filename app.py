@@ -768,20 +768,51 @@ if uploaded_files and len(uploaded_files) == 3:
                             st.dataframe(health_report_df, use_container_width=True, hide_index=True)
 
                         with st.expander("Add labels and mark valve events"):
-                            st.subheader("Fault Labels")
+                           st.subheader("Fault Labels")
+                            
+                            # Define the standard fault labels for the dropdown
+                            FAULT_LABELS = [
+                                "Valve Leakage",
+                                "Valve Wear",
+                                "Valve Sticking or Fouling",
+                                "Valve Impact or Slamming",
+                                "Broken or Missing Valve Parts",
+                                "Valve Misalignment",
+                                "Spring Fatigue or Failure",
+                                "Other"  # Allows for custom input
+                            ]
+
                             for item in report_data:
                                 if item['count'] > 0:
                                     analysis_id = analysis_ids[item['name']]
                                     with st.form(key=f"label_form_{analysis_id}"):
                                         st.write(f"**{item['name']} Anomaly** ({item['count']} points detected)")
-                                        user_label = st.text_input("Enter fault label:", key=f"txt_label_{analysis_id}", placeholder="e.g., Valve sticking, Pressure spike, etc.")
+                                        
+                                        # Use a selectbox for standard labels
+                                        selected_label = st.selectbox(
+                                            "Select fault label:",
+                                            options=FAULT_LABELS,
+                                            key=f"sel_label_{analysis_id}"
+                                        )
+                                        
+                                        # Show a text input only if "Other" is selected
+                                        custom_label = ""
+                                        if selected_label == "Other":
+                                            custom_label = st.text_input(
+                                                "Enter custom label:",
+                                                key=f"txt_label_{analysis_id}"
+                                            )
+                                        
                                         submitted = st.form_submit_button("Save Label")
                                         if submitted:
-                                            if user_label.strip():
-                                                safe_db_operation("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", analysis_id, user_label.strip())
-                                                st.success(f"✅ Label saved for {item['name']}: '{user_label}'")
+                                            # Determine the final label to save
+                                            final_label = custom_label if selected_label == "Other" else selected_label
+                                            
+                                            if final_label.strip():
+                                                safe_db_operation("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", analysis_id, final_label.strip())
+                                                st.success(f"✅ Label saved for {item['name']}: '{final_label}'")
                                             else:
-                                                st.warning("⚠️ Please enter a label before saving.")
+                                                st.warning("⚠️ Please select or enter a label before saving.")
 
                             st.subheader("Mark Valve Open/Close Events")
                             for item in report_data:
@@ -893,4 +924,5 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
 
