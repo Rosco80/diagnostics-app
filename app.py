@@ -59,7 +59,6 @@ def get_last_row_id(_client):
 def load_all_curves_data(_curves_xml_content):
     """Parses the Curves.xml file."""
     try:
-        # This function's logic remains the same as your original script
         root = ET.fromstring(_curves_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Curves'), None)
@@ -80,29 +79,28 @@ def load_all_curves_data(_curves_xml_content):
         st.error(f"Failed to load or parse curves data: {e}")
         return None, None
 
-# (You can add your other helper functions like 'extract_rpm', 'auto_discover_configuration', etc. here)
-# ...
+# (This is a placeholder for your other helper functions like 'extract_rpm', 'auto_discover_configuration', etc.)
+# (Make sure they are defined here)
 
 def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, vertical_offset, analysis_ids):
-    # ... (Plotting function logic, using _db_client to execute queries) ...
-    # This is the Plotly version we created earlier.
-    # This function uses `_db_client.execute(...)` instead of a cursor.
+    """Generates the main diagnostic plot using Plotly."""
     pressure_curve = cylinder_config.get('pressure_curve')
     valve_curves = cylinder_config.get('valve_vibration_curves', [])
     report_data = []
 
-    pres_mean, pres_std = df[pressure_curve].mean(), df[pressure_curve].std()
-    pres_thresh = pres_mean + 2 * pres_std
-    df[f'{pressure_curve}_anom'] = df[pressure_curve] > pres_thresh
-    report_data.append({"name": "Pressure", "curve_name": pressure_curve, "threshold": pres_thresh, "count": df[f'{pressure_curve}_anom'].sum(), "unit": "PSI"})
-
+    # Calculate anomalies and prepare report data
+    if pressure_curve in df.columns:
+        pres_mean, pres_std = df[pressure_curve].mean(), df[pressure_curve].std()
+        pres_thresh = pres_mean + 2 * pres_std
+        report_data.append({"name": "Pressure", "curve_name": pressure_curve, "threshold": pres_thresh, "count": (df[pressure_curve] > pres_thresh).sum(), "unit": "PSI"})
     for vc in valve_curves:
         curve_name = vc['curve']
-        vib_mean, vib_std = df[curve_name].mean(), df[curve_name].std()
-        vib_thresh = vib_mean + 2 * vib_std
-        df[f'{curve_name}_anom'] = df[curve_name] > vib_thresh
-        report_data.append({"name": vc['name'], "curve_name": curve_name, "threshold": vib_thresh, "count": df[f'{curve_name}_anom'].sum(), "unit": "G"})
+        if curve_name in df.columns:
+            vib_mean, vib_std = df[curve_name].mean(), df[curve_name].std()
+            vib_thresh = vib_mean + 2 * vib_std
+            report_data.append({"name": vc['name'], "curve_name": curve_name, "threshold": vib_thresh, "count": (df[curve_name] > vib_thresh).sum(), "unit": "G"})
 
+    # Create Plotly figure
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=df['Crank Angle'], y=df[pressure_curve], name='Pressure (PSI)', line=dict(color='black', width=2)), secondary_y=False)
 
@@ -114,11 +112,13 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         label_name = vc['name']
         color_rgba = f'rgba({colors[i][0]*255},{colors[i][1]*255},{colors[i][2]*255},0.4)'
 
+        # Add vibration envelope traces
         upper_bound = df[curve_name] + current_offset
         lower_bound = -df[curve_name] + current_offset
         fig.add_trace(go.Scatter(x=df['Crank Angle'], y=upper_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), showlegend=False, hoverinfo='none'), secondary_y=True)
         fig.add_trace(go.Scatter(x=df['Crank Angle'], y=lower_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), fill='tonexty', fillcolor=color_rgba, name=label_name, hoverinfo='none'), secondary_y=True)
 
+        # Add valve event markers and shading
         analysis_id = analysis_ids.get(vc['name'])
         if analysis_id:
             events_raw = _db_client.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).rows
@@ -127,38 +127,62 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 fig.add_vrect(x0=events['open'], x1=events['close'], fillcolor=color_rgba, layer="below", line_width=0)
             for event_type, crank_angle in events.items():
                 fig.add_vline(x=crank_angle, line_width=2, line_dash="dash", line_color='green' if event_type == 'open' else 'red')
-
+        
         current_offset += vertical_offset
-
+    
     fig.update_layout(title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}", xaxis_title="Crank Angle (deg)", template="ggplot2")
     fig.update_yaxes(title_text="<b>Pressure (PSI)</b>", secondary_y=False)
     fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", secondary_y=True)
     return fig, report_data
 
 
-# --- Main App ---
+# --- Main Application ---
 db_client = init_db()
 
+# Initialize session state
 if 'active_session_id' not in st.session_state:
     st.session_state.active_session_id = None
 if 'file_uploader_key' not in st.session_state:
     st.session_state.file_uploader_key = 0
 
 st.title("⚙️ AI-Powered Machine Diagnostics Analyzer")
+st.markdown("Upload your machine's XML data files. The configuration will be discovered automatically.")
 
+# Sidebar
 with st.sidebar:
-    # Sidebar UI logic
-    pass
+    st.header("1. Upload Data")
+    uploaded_files = st.file_uploader("Upload Curves, Levels, Source XML files", type=["xml"], accept_multiple_files=True, key=f"file_uploader_{st.session_state.file_uploader_key}")
+    if st.button("Start New Analysis / Clear Files"):
+        st.session_state.file_uploader_key += 1
+        st.session_state.active_session_id = None
+        st.rerun()
+    
+    st.header("2. View Options")
+    envelope_view = st.checkbox("Enable Envelope View", value=True)
+    vertical_offset = st.slider("Vertical Offset", 0.0, 5.0, 1.0, 0.1)
 
 # Main content logic
-uploaded_files = st.file_uploader("Upload XML files", type=["xml"], accept_multiple_files=True, key=f"file_uploader_{st.session_state.file_uploader_key}")
+if uploaded_files and len(uploaded_files) == 3:
+    # This is a simplified logic structure. You will need to re-integrate your full
+    # logic for file parsing, configuration discovery, and UI rendering here.
+    # The key is that this block runs *after* the page is configured and the DB is connected.
+    files_content = {}
+    for f in uploaded_files:
+        if 'curves' in f.name.lower(): files_content['curves'] = f.getvalue().decode('utf-8')
+        elif 'levels' in f.name.lower(): files_content['levels'] = f.getvalue().decode('utf-8')
+        elif 'source' in f.name.lower(): files_content['source'] = f.getvalue().decode('utf-8')
 
-if uploaded_files and len(uploaded_files) >= 1: # Adjust as needed
-    # File processing logic
-    # Make sure to replace your old database calls with the new ones
-    # For example:
-    # db_client.execute("INSERT INTO sessions ...")
-    # new_id = get_last_row_id(db_client)
-    st.success("Files uploaded. Implement your main logic here.")
+    if 'curves' in files_content and 'source' in files_content:
+        df, actual_curve_names = load_all_curves_data(files_content['curves'])
+        if df is not None:
+            # Example placeholder for your logic
+            st.success("Files loaded successfully! App logic should follow.")
+            # discovered_config = auto_discover_configuration(...)
+            # st.plotly_chart(...)
+            # ... and so on
+        else:
+            st.error("Failed to process curve data.")
+    else:
+        st.warning("Please ensure 'curves' and 'source' XML files are uploaded.")
 else:
-    st.info("Please upload your XML data files to begin.")
+    st.info("Please upload all three required XML files to begin.")
