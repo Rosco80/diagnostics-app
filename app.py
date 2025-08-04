@@ -43,6 +43,7 @@ import datetime
 import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import libsql_client.dbapi as dbapi
 
 # Optional PDF generation - handle missing reportlab gracefully
 try:
@@ -71,8 +72,19 @@ FAULT_LABELS = [
 # --- Database Setup ---
 
 def init_db():
-    """Initializes the SQLite database and creates tables if they don't exist."""
-    conn = sqlite3.connect('diagnostics.db')
+    """Initializes the database connection using Turso."""
+    try:
+        url = st.secrets["TURSO_DATABASE_URL"]
+        auth_token = st.secrets["TURSO_AUTH_TOKEN"]
+    except KeyError:
+        st.error("Database secrets (TURSO_DATABASE_URL, TURSO_AUTH_TOKEN) not found. Please configure secrets for Turso.")
+        st.stop()
+
+    conn = dbapi.connect(
+        database=url,
+        auth_token=auth_token
+    )
+    
     c = conn.cursor()
     # Session table to track each analysis run
     c.execute('''
@@ -940,5 +952,6 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
 
 
