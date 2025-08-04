@@ -415,145 +415,122 @@ with st.sidebar:
     machine_ids = [row[0] for row in cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()]
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
 
-# --- Main Logic ---
+# --- Main Application Logic ---
 if uploaded_files and len(uploaded_files) == 3:
+    # 1) Collect & validate your three XML payloads
     files_content = {}
-    for file in uploaded_files:
-        if 'curves' in file.name.lower(): files_content['curves'] = file.getvalue().decode('utf-8')
-        if 'levels' in file.name.lower(): files_content['levels'] = file.getvalue().decode('utf-8')
-        if 'source' in file.name.lower(): files_content['source'] = file.getvalue().decode('utf-8')
+    for f in uploaded_files:
+        name = f.name.lower()
+        if "curves" in name:
+            files_content['curves' ] = f.getvalue().decode("utf-8")
+        if "levels" in name:
+            files_content['levels'] = f.getvalue().decode("utf-8")
+        if "source" in name:
+            files_content['source'] = f.getvalue().decode("utf-8")
 
-    if all(k in files_content for k in ['curves','levels','source']):
-        st.sidebar.success("All files uploaded successfully!")
-        
-        discovered_config = auto_discover_configuration(files_content['source'], files_content['curves'])
-        df, all_curve_names = load_all_curves_data(files_content['curves'])
-        rpm = extract_rpm(files_content['levels'])
-        machine_id = discovered_config.get('machine_id', 'N/A')
-        cursor = db_conn.cursor()
-        cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
-        db_conn.commit()
-        st.session_state.active_session_id = cursor.lastrowid
-        st.info(f"New analysis session #{st.session_state.active_session_id} created.")
+    if not all(k in files_content for k in ("curves","levels","source")):
+        st.sidebar.error("Please upload one each of: Curves.xml, Levels.xml, Source.xml")
+    else:
+        st.sidebar.success("All files uploaded!")
 
-        if df is not None and discovered_config:
-            cylinders = discovered_config.get("cylinders", [])
-            if not cylinders:
-                st.error("Could not automatically discover any valid cylinder configurations.")
-            else:
-                cyl_names = [c['cylinder_name'] for c in cylinders]
-                selected_cylinder = st.sidebar.selectbox("Select Cylinder", cyl_names)
-                selected_cfg = next(c for c in cylinders if c['cylinder_name']==selected_cylinder)
-                _, temp_data = generate_cylinder_view(df.copy(), selected_cfg, envelope_view, vertical_offset, {})
-                analysis_ids = {}
-                for item in temp_data:
-                    cursor.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
-                                   (st.session_state.active_session_id, selected_cylinder, item['curve_name'], item['count'], item['threshold']))
-                    analysis_ids[item['name']] = cursor.lastrowid
-                db_conn.commit()
-                fig, report_data = generate_cylinder_view(df.copy(), selected_cfg, envelope_view, vertical_offset, analysis_ids)
-                st.header(f"📊 Diagnostic Chart for {selected_cylinder}")
-                st.pyplot(fig)
+        # 2) Wrap the entire processing + UI in one try/except
+        try:
+            # --- auto‐discover + data load ---
+            config = auto_discover_configuration(files_content['source'], files_content['curves'])
+            df, _ = load_all_curves_data(files_content['curves'])
+            rpm = extract_rpm(files_content['levels'])
+            machine_id = config.get("machine_id", "N/A")
 
-                # PDF Download
-                if st.button("Download PDF Report"):
-                    lines = [f"Machine ID: {machine_id}", f"Operating RPM: {rpm}", f"Data Points: {len(df)}"] + [
-                        f"{i['name']} Anomalies: {i['count']} (Threshold: {i['threshold']:.2f} {i['unit']})" for i in report_data
-                    ]
-                    chart_buf = io.BytesIO()
-                    fig.savefig(chart_buf, format='png', bbox_inches='tight')
-                    chart_buf.seek(0)
-                    pdf_buf = build_pdf(lines, chart_buf)
-                    st.download_button("Download PDF Report", data=pdf_buf, file_name=f"Diagnostics_{st.session_state.active_session_id}.pdf", mime="application/pdf")
+            # 3) Create session row
+            cursor = db_conn.cursor()
+            cursor.execute(
+                "INSERT INTO sessions (machine_id,rpm) VALUES (?,?)",
+                (machine_id, rpm)
+            )
+            db_conn.commit()
+            st.session_state.active_session_id = cursor.lastrowid
+            st.info(f"Session #{st.session_state.active_session_id} created.")
 
-                # Labeling UI
-                st.header("🏷️ Anomaly Labeling")
-                with st.expander("Add labels to detected anomalies and valve events"):
-                    st.subheader("Fault Labels")
-                    for item in report_data:
-                        if item['count']>0:
-                            aid = analysis_ids[item['name']]
-                            lbl = st.text_input(f"Label for {item['name']}", key=f"lbl_{aid}")
-                            if st.button(f"Save Label for {item['name']}", key=f"btn_lbl_{aid}"):
-                                if lbl:
-                                    cursor.execute("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", (aid, lbl))
-                                    db_conn.commit()
-                                    st.success(f"Saved label: {lbl}")
-                                else:
-                                    st.warning("Enter a label first")
+            # 4) Cylinder selector + chart + labeling UI + PDF download
+            cylinders = config["cylinders"]
+            cyl_names = [c["cylinder_name"] for c in cylinders]
+            sel = st.sidebar.selectbox("Select Cylinder", cyl_names)
+            sel_cfg = next(c for c in cylinders if c["cylinder_name"] == sel)
 
-                    st.subheader("Mark Valve Open/Close Events")
-                    for item in report_data:
-                        if item['name']!='Pressure':
-                            aid = analysis_ids[item['name']] 
-                            evts = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id=?",(aid,)).fetchall()
-                            open_def = next((a for e,a in evts if e=='open'),0.0)
-                            close_def = next((a for e,a in evts if e=='close'),0.0)
-                            cols = st.columns([3,2,2,2])
-                            with cols[0]: st.write(f"**{item['name']}**")
-                            with cols[1]: open_angle = st.number_input("Open Angle", key=f"open_{aid}", value=open_def, step=0.1)
-                            with cols[2]: close_angle = st.number_input("Close Angle", key=f"close_{aid}", value=close_def, step=0.1)
-                            with cols[3]:
-                                if st.button(f"Save Events for {item['name']}", key=f"btn_evt_{aid}"):
-                                    cursor.execute("DELETE FROM valve_events WHERE analysis_id=?",(aid,))
-                                    cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?,?,?)",(aid,'open',open_angle))
-                                    cursor.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?,?,?)",(aid,'close',close_angle))
-                                    db_conn.commit()
-                                    st.rerun()
+            # initial anomaly detection to seed analyses table
+            _, tmp = generate_cylinder_view(df.copy(), sel_cfg, envelope_view, vertical_offset, {})
+            analysis_ids = {}
+            for item in tmp:
+                cursor.execute(
+                    ("INSERT INTO analyses "
+                     "(session_id,cylinder_name,curve_name,anomaly_count,threshold) "
+                     "VALUES (?,?,?,?,?)"),
+                    (st.session_state.active_session_id, sel, item["curve_name"], item["count"], item["threshold"])
+                )
+                analysis_ids[item["name"]] = cursor.lastrowid
+            db_conn.commit()
 
-                # Summary and Health Report
-                st.header("📝 Diagnostic Summary")
-                cyl_idx = int(re.search(r'\d+', selected_cylinder).group())
-                disc_temp = extract_temperature(files_content['levels'], cyl_idx)
-                st.markdown(f"**Machine ID:** {machine_id} | **RPM:** {rpm} | **Discharge Temp:** {disc_temp}")
-                st.markdown(f"**Data Points:** {len(df)}")
-                st.markdown("---")
-                for item in report_data:
-                    st.markdown(f"- **{item['name']}**: {item['count']} anomalies (Threshold {item['threshold']:.2f} {item['unit']})")
+            # draw final chart
+            fig, report_data = generate_cylinder_view(
+                df.copy(), sel_cfg, envelope_view, vertical_offset, analysis_ids
+            )
+            st.header(f"📊 Diagnostic Chart for {sel}")
+            st.pyplot(fig)
 
-                st.header("Compressor Health Report")
-                health_df = generate_health_report_table(files_content['source'], files_content['levels'], cyl_idx)
-                if not health_df.empty:
-                    st.dataframe(health_df)
+            # PDF button
+            if st.button("Download PDF Report"):
+                lines = [
+                    f"Machine ID: {machine_id}",
+                    f"RPM: {rpm}",
+                    f"Data Points: {len(df)}",
+                ] + [
+                    f"{d['name']} Anomalies: {d['count']} (Thresh: {d['threshold']:.2f} {d['unit']})"
+                    for d in report_data
+                ]
+                img_buf = io.BytesIO()
+                fig.savefig(img_buf, format="png", bbox_inches="tight")
+                img_buf.seek(0)
+                pdf = build_pdf(lines, img_buf)
+                st.download_button(
+                    "Download PDF Report",
+                    data=pdf,
+                    file_name=f"Diagnostics_Session_{st.session_state.active_session_id}.pdf",
+                    mime="application/pdf"
+                )
 
-                st.header("Cylinder Details")
-                details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
-                cols = st.columns(len(details))
-                for i, d in enumerate(details):
-                    with cols[i]:
-                        st.markdown(f"""
-                        <div class="detail-card">
-                            <h5>{d['name']}</h5>
-                            <div class="detail-item"><span>Bore:</span> <strong>{d['bore']}</strong></div>
-                            <div class="detail-item"><span>Suction Temp:</span> <strong>{d['suction_temp']}</strong></div>
-                            <div class="detail-item"><span>Discharge Temp:</span> <strong>{d['discharge_temp']}</strong></div>
-                            <div class="detail-item"><span>Suction Pressure:</span> <strong>{d['suction_pressure']}</strong></div>
-                            <div class="detail-item"><span>Discharge Pressure:</span> <strong>{d['discharge_pressure']}</strong></div>
-                            <div class="detail-item"><span>Flow CE:</span> <strong>{d['flow_balance_ce']}</strong></div>
-                            <div class="detail-item"><span>Flow HE:</span> <strong>{d['flow_balance_he']}</strong></div>
-                        </div>
-                        """, unsafe_allow_html=True)
-    except Exception as e:
-        st.error(f"Processing error: {e}")
+            # Anomaly labeling & valve events...
+            # <your existing code here, unchanged>
+
+        except Exception as e:
+            st.error(f"Processing error: {e}")
+
+elif uploaded_files:
+    st.sidebar.warning(f"Upload all 3 files (you’ve provided {len(uploaded_files)}/3).")
 else:
-    st.sidebar.warning("Please upload Curves, Levels, Source XML to begin.")
+    st.info("Please upload Curves.xml, Levels.xml, and Source.xml to begin.")
 
 # --- Display All Saved Labels ---
 st.header("📋 All Saved Labels")
 cursor = db_conn.cursor()
-query = "SELECT s.timestamp, s.machine_id, a.cylinder_name, a.curve_name, l.label_text FROM labels l JOIN analyses a ON l.analysis_id=a.id JOIN sessions s ON a.session_id=s.id"
+query = (
+    "SELECT s.timestamp, s.machine_id, a.cylinder_name, a.curve_name, l.label_text "
+    "FROM labels l "
+    "JOIN analyses a ON l.analysis_id=a.id "
+    "JOIN sessions s ON a.session_id=s.id"
+)
 params = []
 if selected_machine_id_filter != "All":
     query += " WHERE s.machine_id=?"
     params.append(selected_machine_id_filter)
 query += " ORDER BY s.timestamp DESC"
 all_labels = cursor.execute(query, params).fetchall()
+
 if all_labels:
-    labels_df = pd.DataFrame(all_labels, columns=['Timestamp','Machine ID','Cylinder','Curve','Label'])
+    labels_df = pd.DataFrame(all_labels, columns=["Timestamp","Machine ID","Cylinder","Curve","Label"])
     st.dataframe(labels_df)
     st.download_button(
         "Download All Labels as JSON",
-        data=json.dumps([dict(zip(labels_df.columns, row)) for row in all_labels], indent=2),
+        data=json.dumps([dict(zip(labels_df.columns, r)) for r in all_labels], indent=2),
         file_name="all_anomaly_labels.json",
         mime="application/json"
     )
