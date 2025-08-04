@@ -31,7 +31,7 @@ streamlit run app.py
 """
 
 import streamlit as st
-import xml.et.ree.ElementTree as ET
+import xml.etree.ElementTree as ET
 import re
 import pandas as pd
 import numpy as np
@@ -758,25 +758,25 @@ if uploaded_files and len(uploaded_files) == 3:
                                     mime="application/pdf" if REPORTLAB_AVAILABLE else "text/html"
                                 )
 
-                    st.markdown("---")
-                    st.header("🔧 All Cylinder Details")
-                    all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
-                    if all_details:
-                        cols = st.columns(len(all_details) or 1)
-                        for i, detail in enumerate(all_details):
-                            with cols[i]:
-                                st.markdown(f"""
-                                <div class="detail-card">
-                                    <h5>{detail['name']}</h5>
-                                    <div class="detail-item"><span>Bore:</span> <strong>{detail['bore']}</strong></div>
-                                    <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
-                                    <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
-                                    <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
-                                    <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
-                                    <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
-                                    <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
-                                </div>
-                                """, unsafe_allow_html=True)
+                        st.markdown("---")
+                        st.header("🔧 All Cylinder Details")
+                        all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
+                        if all_details:
+                            cols = st.columns(len(all_details) or 1)
+                            for i, detail in enumerate(all_details):
+                                with cols[i]:
+                                    st.markdown(f"""
+                                    <div class="detail-card">
+                                        <h5>{detail['name']}</h5>
+                                        <div class="detail-item"><span>Bore:</span> <strong>{detail['bore']}</strong></div>
+                                        <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
+                                        <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
+                                        <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
+                                        <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
+                                        <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
+                                        <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
 
             elif df is None:
                 st.error("Failed to load data from Curves.xml. Cannot proceed.")
@@ -831,14 +831,10 @@ except Exception as e:
     st.error(f"❌ Error retrieving labels: {str(e)}")
 
 # --- Footer ---
-st.markdown("""
+st.markdown(f"""
 <div style='text-align: center; color: #666; font-size: 0.8em;'>
     🔧 AI-Powered Machine Diagnostics Analyzer | 
-    Session ID: {} | 
-    Last Updated: {}
+    Session ID: {st.session_state.active_session_id or "None"} | 
+    Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
-""").format(
-    st.session_state.active_session_id or "None", 
-    datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-), unsafe_allow_html=Tr
-
+""", unsafe_allow_html=True)
