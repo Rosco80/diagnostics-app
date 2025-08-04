@@ -4,3 +4,4 @@ numpy>=1.21.0
 matplotlib>=3.5.0
 reportlab>=3.6.0
 plotly>=5.0.0
+libsql-client>=0.2.0
