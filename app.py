@@ -364,12 +364,13 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
 
-def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_pattern=None):
+def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_pattern=None, occurrence=1):
     """
     Robustly finds a value in a worksheet.
     - If cylinder_id_pattern is None, it uses partial_key and col_offset.
     - If cylinder_id_pattern is provided, it finds the row with partial_key and then
       searches that row for a cell containing the cylinder_id_pattern.
+    - `occurrence` specifies which match to use if multiple rows contain the partial_key (1-based).
     """
     try:
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
@@ -378,6 +379,7 @@ def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_patter
             return "N/A"
         
         rows = ws.findall('.//ss:Row', NS)
+        match_count = 0
         for row in rows:
             all_cells_in_row = row.findall('ss:Cell', NS)
             if not all_cells_in_row:
@@ -389,6 +391,10 @@ def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_patter
 
             cell_text = (first_cell_data_node.text or "").strip().upper()
             if partial_key.upper() not in cell_text:
+                continue
+
+            match_count += 1
+            if match_count != occurrence:
                 continue
 
             # --- LOGIC FOR DIFFERENT DATA STRUCTURES ---
@@ -411,16 +417,18 @@ def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_patter
             # Case 2: Data is in a fixed column offset (handles ss:Index)
             else:
                 dense_cells = {}
-                current_idx = 0
+                current_idx = 1 # Spreadsheet columns are 1-based
                 for cell in all_cells_in_row:
                     ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
                     if ss_index_str:
-                        current_idx = int(ss_index_str) - 1
+                        current_idx = int(ss_index_str)
                     dense_cells[current_idx] = cell
                     current_idx += 1
-
-                if col_offset in dense_cells:
-                    value_node = dense_cells[col_offset].find('ss:Data', NS)
+                
+                # Adjust col_offset to be 1-based for lookup
+                target_idx = col_offset + 1
+                if target_idx in dense_cells:
+                    value_node = dense_cells[target_idx].find('ss:Data', NS)
                     return value_node.text if value_node is not None and value_node.text else "N/A"
                 else:
                     return "N/A"
@@ -437,8 +445,6 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         levels_root = ET.fromstring(_levels_xml_content)
         
         col_idx = cylinder_index + 1
-        cyl_pattern_main = f"C.{cylinder_index}."
-        cyl_pattern_alt = f"C{cylinder_index}."
 
         def convert_kpa_to_psi(kpa_str):
             if kpa_str == "N/A" or not kpa_str: return "N/A"
@@ -447,22 +453,33 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
             except (ValueError, TypeError):
                 return kpa_str
         
-        suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', col_idx))
-        discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', col_idx))
+        # Fetch stage-level data from Levels.xml (value is in the 3rd cell, so offset is 2)
+        suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE GAUGE', 2))
+        discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE GAUGE', 2))
+        suction_temp = find_xml_value(levels_root, 'Levels', 'SUCTION GAUGE TEMPERATURE', 2)
         
+        # Fetch per-cylinder discharge temp from Levels.xml
+        discharge_temp = find_xml_value(levels_root, 'Levels', 'COMP CYL, DISCHARGE TEMPERATURE', col_idx)
+
+        # Fetch per-cylinder data from Source.xml
+        bore = find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)
+        rod_diam = find_xml_value(source_root, 'Source', 'PISTON ROD DIAMETER', col_idx)
+        
+        # Use occurrence to get the correct values from repeated rows
+        comp_ratio_he = find_xml_value(source_root, 'Source', 'COMPRESSION RATIO', col_idx, occurrence=2) # HEAD END is second match
+        comp_ratio_ce = find_xml_value(source_root, 'Source', 'COMPRESSION RATIO', col_idx, occurrence=1) # CRANK END is first match
+        
+        power_he = find_xml_value(source_root, 'Source', 'HORSEPOWER INDICATED,  LOAD', col_idx, occurrence=2)
+        power_ce = find_xml_value(source_root, 'Source', 'HORSEPOWER INDICATED,  LOAD', col_idx, occurrence=1)
+
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)] * 2,
-            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', 'PISTON ROD DIAMETER', col_idx)],
+            'Bore (ins)': [bore] * 2,
+            'Rod Diam (ins)': ['N/A', rod_diam],
             'Pressure Ps/Pd (psig)': [f"{suction_p} / {discharge_p}"] * 2,
-            'Temp Ts/Td (°C)': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_main)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_alt)}",
-            ] * 2,
-            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', col_idx)] * 2,
-            'Indicated Power (ihp)': [
-                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', col_idx),
-                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', col_idx)
-            ]
+            'Temp Ts/Td (°C)': [f"{suction_temp} / {discharge_temp}"] * 2,
+            'Comp. Ratio': [comp_ratio_he, comp_ratio_ce],
+            'Indicated Power (ihp)': [power_he, power_ce]
         }
         
         df_table = pd.DataFrame(data)
@@ -486,27 +503,30 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
             except (ValueError, TypeError):
                 return kpa_str
 
+        # --- Fetch Stage-Level Data (single value for all cylinders) ---
+        # Note: col_offset=2 because value is in the 3rd cell (index 2).
+        stage_suction_p_psi = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE GAUGE', 2))
+        stage_discharge_p_psi = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE GAUGE', 2))
+        stage_suction_temp = find_xml_value(levels_root, 'Levels', 'SUCTION GAUGE TEMPERATURE', 2)
+
         for i in range(1, num_cylinders + 1):
             col_idx = i + 1
-            cyl_pattern_main = f"C.{i}." # Pattern for Suction Temp
-            cyl_pattern_alt = f"C{i}." # Pattern for Discharge Temp
             
-            suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', col_idx))
-            discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', col_idx))
-
             detail = {
                 "name": f"Cylinder {i}",
                 "bore": f"{find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)} in",
-                "suction_temp": f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_main)} °C",
-                "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_alt)} °C",
-                "suction_pressure": f"{suction_p} psig",
-                "discharge_pressure": f"{discharge_p} psig",
-                "flow_balance_ce": f"{find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', col_idx)} %",
-                "flow_balance_he": f"{find_xml_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', col_idx)} %"
+                "suction_temp": f"{stage_suction_temp} °C",
+                "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'COMP CYL, DISCHARGE TEMPERATURE', col_idx)} °C",
+                "suction_pressure": f"{stage_suction_p_psi} psig",
+                "discharge_pressure": f"{stage_discharge_p_psi} psig",
+                # Use occurrence=1 for CRANK END (first match of "FLOW BALANCE" in Source.xml)
+                "flow_balance_ce": f"{find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=1)} %",
+                # Use occurrence=2 for HEAD END (second match of "FLOW BALANCE" in Source.xml)
+                "flow_balance_he": f"{find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=2)} %"
             }
 
             for key, value in detail.items():
-                if "N/A" in str(value):
+                if "N/A" in str(value) or not value.strip():
                     detail[key] = "N/A"
             
             details.append(detail)
