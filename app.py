@@ -689,7 +689,38 @@ if uploaded_files and len(uploaded_files) == 3:
                             st.dataframe(health_report_df, use_container_width=True, hide_index=True)
 
                         with st.expander("Add labels and mark valve events"):
-                            # ... (labeling forms remain the same)
+                            st.subheader("Fault Labels")
+                            for item in report_data:
+                                if item['count'] > 0:
+                                    analysis_id = analysis_ids[item['name']]
+                                    with st.form(key=f"label_form_{analysis_id}"):
+                                        st.write(f"**{item['name']} Anomaly** ({item['count']} points detected)")
+                                        user_label = st.text_input("Enter fault label:", key=f"txt_label_{analysis_id}", placeholder="e.g., Valve sticking, Pressure spike, etc.")
+                                        submitted = st.form_submit_button("Save Label")
+                                        if submitted:
+                                            if user_label.strip():
+                                                safe_db_operation("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", analysis_id, user_label.strip())
+                                                st.success(f"✅ Label saved for {item['name']}: '{user_label}'")
+                                            else:
+                                                st.warning("⚠️ Please enter a label before saving.")
+
+                            st.subheader("Mark Valve Open/Close Events")
+                            for item in report_data:
+                                if item['name'] != 'Pressure':  # Only for valves
+                                    analysis_id = analysis_ids[item['name']]
+                                    with st.form(key=f"valve_form_{analysis_id}"):
+                                        st.write(f"**{item['name']} Valve Events:**")
+                                        cols = st.columns(2)
+                                        open_angle = cols[0].number_input("Open Angle", key=f"open_{analysis_id}", value=None, format="%.2f", help="Enter the crank angle where the valve opens")
+                                        close_angle = cols[1].number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%.2f", help="Enter the crank angle where the valve closes")
+                                        submitted = st.form_submit_button(f"Save Events for {item['name']}")
+                                        if submitted:
+                                            safe_db_operation("DELETE FROM valve_events WHERE analysis_id = ?", analysis_id)
+                                            if open_angle is not None:
+                                                safe_db_operation("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", analysis_id, 'open', open_angle)
+                                            if close_angle is not None:
+                                                safe_db_operation("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", analysis_id, 'close', close_angle)
+                                            st.success(f"✅ Events updated for {item['name']}.")
 
                         st.header("📄 Export Report")
                         if st.button("🔄 Generate Report for this Cylinder", type="primary"):
