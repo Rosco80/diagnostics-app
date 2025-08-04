@@ -128,6 +128,29 @@ def extract_rpm(_levels_xml_content):
         return "N/A"
     return "N/A"
 
+def extract_temperature(_levels_xml_content, cylinder_index):
+    """Extracts discharge temperature for a specific cylinder index."""
+    try:
+        root = ET.fromstring(_levels_xml_content)
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
+        if ws_levels is None: return "N/A"
+        
+        table = ws_levels.find('.//ss:Table', NS)
+        rows = table.findall('ss:Row', NS)
+        for row in rows:
+            cells = row.findall('ss:Cell', NS)
+            # Data for cylinder 'n' is in column n+1 (e.g., Cyl 1 is in col index 2)
+            if len(cells) > cylinder_index + 1 and cells[0].find('ss:Data', NS) is not None:
+                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
+                if "DISCHARGE TEMPERATURE" in cell_text:
+                    temp_node = cells[cylinder_index + 1].find('ss:Data', NS)
+                    if temp_node is not None and temp_node.text:
+                        return f"{float(temp_node.text):.1f}°C"
+    except (ValueError, IndexError):
+        return "N/A"
+    return "N/A"
+
 @st.cache_data
 def auto_discover_configuration(_source_xml_content, _curves_xml_content):
     """
