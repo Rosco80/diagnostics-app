@@ -45,7 +45,7 @@ import time
 # Optional PDF generation - handle missing reportlab gracefully
 try:
     from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib import colors
     REPORTLAB_AVAILABLE = True
@@ -138,12 +138,12 @@ def validate_angle(angle, valve_name):
     
     return True
 
-def generate_pdf_report(machine_id, rpm, cylinder_name, report_data, health_report_df, chart_fig=None):
-    """Generate a PDF report of the analysis"""
+def generate_pdf_report(machine_id, rpm, all_cylinders_report_info):
+    """Generate a consolidated PDF report for all cylinders."""
     if not REPORTLAB_AVAILABLE:
-        return generate_html_report(machine_id, rpm, cylinder_name, report_data, health_report_df, chart_fig)
+        return generate_html_report(machine_id, rpm, all_cylinders_report_info)
     
-    from reportlab.platypus import Image, PageBreak
+    from reportlab.platypus import Image
     from reportlab.lib.units import inch
     
     buffer = io.BytesIO()
@@ -151,198 +151,138 @@ def generate_pdf_report(machine_id, rpm, cylinder_name, report_data, health_repo
     styles = getSampleStyleSheet()
     story = []
     
-    # Title
-    title = Paragraph(f"Machine Diagnostics Report - {machine_id}", styles['Title'])
+    # Main Title
+    title = Paragraph(f"Consolidated Machine Diagnostics Report", styles['Title'])
     story.append(title)
-    story.append(Spacer(1, 12))
-    
-    # Basic info
-    info_text = f"<b>Machine ID:</b> {machine_id}<br/><b>RPM:</b> {rpm}<br/><b>Cylinder:</b> {cylinder_name}<br/><b>Analysis Date:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    info_para = Paragraph(info_text, styles['Normal'])
-    story.append(info_para)
-    story.append(Spacer(1, 12))
-    
-    # Add diagnostic chart if provided
-    if chart_fig is not None:
-        try:
-            # Save matplotlib figure to bytes
-            img_buffer = io.BytesIO()
-            chart_fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
-            img_buffer.seek(0)
-            
-            # Add chart to PDF
-            chart_title = Paragraph("Diagnostic Chart", styles['Heading2'])
-            story.append(chart_title)
-            story.append(Spacer(1, 6))
-            
-            # Create image with proper sizing
-            img = Image(img_buffer, width=7*inch, height=4*inch)
-            story.append(img)
-            story.append(Spacer(1, 12))
-            
-        except Exception as e:
-            error_para = Paragraph(f"<i>Chart could not be included: {str(e)}</i>", styles['Normal'])
-            story.append(error_para)
-            story.append(Spacer(1, 12))
-    
-    # Anomaly summary
-    anomaly_title = Paragraph("Anomaly Summary", styles['Heading2'])
-    story.append(anomaly_title)
     story.append(Spacer(1, 6))
-    
-    for item in report_data:
-        status_icon = "●" if item['count'] > 0 else "○"
-        anomaly_text = f"<b>{status_icon} {item['name']}:</b> {item['count']} anomalies detected (Threshold: {item['threshold']:.2f} {item['unit']})"
-        story.append(Paragraph(anomaly_text, styles['Normal']))
-    
-    story.append(Spacer(1, 12))
-    
-    # Health report table
-    if not health_report_df.empty:
-        health_title = Paragraph("Health Report", styles['Heading2'])
-        story.append(health_title)
-        story.append(Spacer(1, 6))
-        
-        # Convert DataFrame to table data with proper formatting
-        table_data = [health_report_df.columns.tolist()]
-        for _, row in health_report_df.iterrows():
-            table_data.append([str(val) for val in row.tolist()])
-        
-        # Calculate column widths based on content
-        col_widths = [1.2*inch, 1.2*inch, 1.5*inch, 1.5*inch, 1.0*inch, 1.2*inch]
-        
-        table = Table(table_data, colWidths=col_widths)
-        table.setStyle(TableStyle([
-            # Header styling
-            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('TOPPADDING', (0, 0), (-1, 0), 8),
-            
-            # Data rows styling
-            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('TOPPADDING', (0, 1), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
-            
-            # Grid and borders
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            
-            # Alternating row colors
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.lightgrey, colors.white]),
-        ]))
-        story.append(table)
-    
-    # Footer
+    info_text = f"<b>Machine ID:</b> {machine_id} | <b>RPM:</b> {rpm} | <b>Analysis Date:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    story.append(Paragraph(info_text, styles['Normal']))
     story.append(Spacer(1, 24))
-    footer_text = f"<i>Generated by AI-Powered Machine Diagnostics Analyzer on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
-    footer_para = Paragraph(footer_text, styles['Normal'])
-    story.append(footer_para)
-    
+
+    for i, cylinder_info in enumerate(all_cylinders_report_info):
+        cylinder_name = cylinder_info['name']
+        chart_fig = cylinder_info['fig']
+        report_data = cylinder_info['report_data']
+        health_report_df = cylinder_info['health_report_df']
+
+        # Cylinder Title
+        story.append(Paragraph(f"Analysis for {cylinder_name}", styles['h1']))
+        story.append(Spacer(1, 12))
+
+        # Add diagnostic chart
+        if chart_fig is not None:
+            try:
+                img_buffer = io.BytesIO()
+                chart_fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+                img_buffer.seek(0)
+                story.append(Paragraph("Diagnostic Chart", styles['h2']))
+                story.append(Spacer(1, 6))
+                story.append(Image(img_buffer, width=7*inch, height=4*inch))
+                story.append(Spacer(1, 12))
+            except Exception as e:
+                story.append(Paragraph(f"<i>Chart could not be included: {str(e)}</i>", styles['Normal']))
+        
+        # Anomaly summary
+        story.append(Paragraph("Anomaly Summary", styles['h2']))
+        story.append(Spacer(1, 6))
+        for item in report_data:
+            status_icon = "●" if item['count'] > 0 else "○"
+            anomaly_text = f"<b>{status_icon} {item['name']}:</b> {item['count']} anomalies detected (Threshold: {item['threshold']:.2f} {item['unit']})"
+            story.append(Paragraph(anomaly_text, styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Health report table
+        if not health_report_df.empty:
+            story.append(Paragraph("Health Report", styles['h2']))
+            story.append(Spacer(1, 6))
+            table_data = [health_report_df.columns.tolist()] + health_report_df.values.tolist()
+            table = Table(table_data, colWidths=[0.8*inch, 0.9*inch, 1.1*inch, 1.5*inch, 1.2*inch, 0.8*inch, 1.2*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'), ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9), ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey), ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.lightgrey, colors.white]),
+            ]))
+            story.append(table)
+
+        # Add a page break if it's not the last cylinder
+        if i < len(all_cylinders_report_info) - 1:
+            story.append(PageBreak())
+
     doc.build(story)
     buffer.seek(0)
     return buffer
 
-def generate_html_report(machine_id, rpm, cylinder_name, report_data, health_report_df, chart_fig=None):
-    """Generate an HTML report as fallback when reportlab is not available"""
-    
-    # Convert chart to base64 if provided
-    chart_html = ""
-    if chart_fig is not None:
-        try:
-            img_buffer = io.BytesIO()
-            chart_fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
-            img_buffer.seek(0)
-            import base64
-            chart_b64 = base64.b64encode(img_buffer.getvalue()).decode()
-            chart_html = f'<img src="data:image/png;base64,{chart_b64}" style="max-width: 100%; height: auto; margin: 20px 0;">'
-        except Exception as e:
-            chart_html = f'<p style="color: #dc3545;"><i>Chart could not be included: {str(e)}</i></p>'
-    
+def generate_html_report(machine_id, rpm, all_cylinders_report_info):
+    """Generate a consolidated HTML report for all cylinders."""
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Machine Diagnostics Report - {machine_id}</title>
+        <title>Consolidated Machine Diagnostics Report - {machine_id}</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
             h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-            h2 {{ color: #34495e; margin-top: 30px; margin-bottom: 15px; }}
+            h2 {{ color: #34495e; margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #ccc; padding-bottom: 5px;}}
+            h3 {{ color: #3498db; margin-top: 25px; }}
             .info-box {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; }}
             .anomaly-item {{ margin: 10px 0; padding: 10px; background-color: #fff3cd; border-radius: 3px; }}
             table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
             th, td {{ border: 1px solid #ddd; padding: 12px 8px; text-align: center; }}
             th {{ background-color: #343a40; color: white; font-weight: bold; }}
             tr:nth-child(even) {{ background-color: #f8f9fa; }}
-            tr:nth-child(odd) {{ background-color: white; }}
-            .status-ok {{ color: #28a745; }}
-            .status-warn {{ color: #ffc107; }}
-            .status-error {{ color: #dc3545; }}
-            .chart-container {{ text-align: center; margin: 20px 0; }}
-            @media print {{ 
-                body {{ margin: 20px; }} 
-                .chart-container img {{ max-width: 100%; page-break-inside: avoid; }}
-            }}
+            .status-ok {{ color: #28a745; }} .status-error {{ color: #dc3545; }}
+            .chart-container {{ text-align: center; margin: 20px 0; page-break-inside: avoid; }}
+            .cylinder-section {{ page-break-before: always; padding-top: 20px; }}
+            .cylinder-section:first-child {{ page-break-before: auto; }}
         </style>
     </head>
     <body>
-        <h1>Machine Diagnostics Report - {machine_id}</h1>
-        
+        <h1>Consolidated Machine Diagnostics Report</h1>
         <div class="info-box">
             <strong>Machine ID:</strong> {machine_id}<br/>
             <strong>RPM:</strong> {rpm}<br/>
-            <strong>Cylinder:</strong> {cylinder_name}<br/>
             <strong>Analysis Date:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         </div>
-        
-        <h2>Diagnostic Chart</h2>
-        <div class="chart-container">
-            {chart_html}
-        </div>
-        
-        <h2>Anomaly Summary</h2>
     """
-    
-    for item in report_data:
-        status_class = "status-error" if item['count'] > 0 else "status-ok"
-        status_icon = "●" if item['count'] > 0 else "○"
-        html_content += f"""
-        <div class="anomaly-item">
-            <strong class="{status_class}">{status_icon} {item['name']}:</strong> 
-            {item['count']} anomalies detected 
-            (Threshold: {item['threshold']:.2f} {item['unit']})
-        </div>
-        """
-    
-    if not health_report_df.empty:
-        html_content += "<h2>Health Report</h2><table>"
-        # Add header
-        html_content += "<tr>"
-        for col in health_report_df.columns:
-            html_content += f"<th>{col}</th>"
-        html_content += "</tr>"
+
+    for cylinder_info in all_cylinders_report_info:
+        cylinder_name = cylinder_info['name']
+        chart_fig = cylinder_info['fig']
+        report_data = cylinder_info['report_data']
+        health_report_df = cylinder_info['health_report_df']
+
+        html_content += f"<div class='cylinder-section'><h2>Analysis for {cylinder_name}</h2>"
         
-        # Add data rows
-        for _, row in health_report_df.iterrows():
-            html_content += "<tr>"
-            for value in row:
-                html_content += f"<td>{value}</td>"
-            html_content += "</tr>"
-        html_content += "</table>"
-    
-    html_content += f"""
-        <div style="margin-top: 50px; font-size: 0.9em; color: #666; text-align: center;">
-            Generated by AI-Powered Machine Diagnostics Analyzer on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        </div>
-    </body>
-    </html>
-    """
-    
+        # Chart
+        if chart_fig:
+            img_buffer = io.BytesIO()
+            chart_fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+            import base64
+            chart_b64 = base64.b64encode(img_buffer.getvalue()).decode()
+            html_content += f'<h3>Diagnostic Chart</h3><div class="chart-container"><img src="data:image/png;base64,{chart_b64}" style="max-width: 100%; height: auto;"></div>'
+
+        # Anomaly Summary
+        html_content += "<h3>Anomaly Summary</h3>"
+        for item in report_data:
+            status_class = "status-error" if item['count'] > 0 else "status-ok"
+            status_icon = "●" if item['count'] > 0 else "○"
+            html_content += f"""
+            <div class="anomaly-item">
+                <strong class="{status_class}">{status_icon} {item['name']}:</strong> 
+                {item['count']} anomalies detected (Threshold: {item['threshold']:.2f} {item['unit']})
+            </div>"""
+
+        # Health Report
+        if not health_report_df.empty:
+            html_content += "<h3>Health Report</h3>"
+            html_content += health_report_df.to_html(index=False, border=0)
+
+        html_content += "</div>"
+
+    html_content += "</body></html>"
     return io.BytesIO(html_content.encode('utf-8'))
 
 @st.cache_data
@@ -721,6 +661,7 @@ with st.sidebar:
     )
     if st.button("Start New Analysis / Clear Files"):
         st.session_state.file_uploader_key += 1
+        st.session_state.active_session_id = None
         st.rerun()
 
     st.header("2. View Options")
@@ -755,21 +696,14 @@ if uploaded_files and len(uploaded_files) == 3:
             discovered_config = None
             # Show progress indicator
             with st.spinner("Analyzing machine data..."):
-                # Step 1: Load data and get the *actual* columns used in the DataFrame.
                 df, actual_curve_names = load_all_curves_data(files_content['curves'])
-                
-                # Step 2: Pass the actual columns to the discovery function to ensure sync.
                 if df is not None and actual_curve_names is not None:
                     discovered_config = auto_discover_configuration(files_content['source'], actual_curve_names)
-                else:
-                    # If df loading fails, discovered_config remains None
-                    discovered_config = None
             
             if df is not None and discovered_config:
                 rpm = extract_rpm(files_content['levels'])
                 machine_id = discovered_config.get('machine_id', 'N/A')
                 
-                # Only create a new session if one isn't active
                 if st.session_state.active_session_id is None:
                     cursor = db_conn.cursor()
                     cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
@@ -781,219 +715,116 @@ if uploaded_files and len(uploaded_files) == 3:
                 if not cylinders:
                     st.error("Could not automatically discover any valid cylinder configurations.")
                 else:
-                    cylinder_names = [c.get("cylinder_name") for c in cylinders]
-                    selected_cylinder_name = st.sidebar.selectbox("Select Cylinder for Detailed View", cylinder_names, key="cylinder_selector")
-                    
-                    selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
+                    # --- Loop through all cylinders and display their analysis ---
+                    all_cylinders_report_info = []
 
-                    if selected_cylinder_config:
-                        # Perform analysis once to get report data
-                        _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
+                    for cylinder_config in cylinders:
+                        cylinder_name = cylinder_config.get("cylinder_name")
+                        st.markdown("---")
+                        st.header(f"Analysis for {cylinder_name}")
+
+                        # Generate view and insert into DB
+                        _, temp_report_data = generate_cylinder_view(df.copy(), cylinder_config, envelope_view, vertical_offset, {})
                         
                         analysis_ids = {}
                         cursor = db_conn.cursor()
                         for item in temp_report_data:
-                            cursor.execute( "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
-                                (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
+                            cursor.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
+                                (st.session_state.active_session_id, cylinder_name, item['curve_name'], item['count'], item['threshold']))
                             analysis_ids[item['name']] = cursor.lastrowid
                         db_conn.commit()
 
-                        fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
+                        # Regenerate view with analysis IDs for event plotting
+                        fig, report_data = generate_cylinder_view(df.copy(), cylinder_config, envelope_view, vertical_offset, analysis_ids)
                         
-                        st.header(f"📊 Diagnostic Chart for {selected_cylinder_name}")
+                        st.subheader(f"📊 Diagnostic Chart")
                         st.pyplot(fig)
                         
-                        st.header("🏷️ Anomaly Labeling")
-                        with st.expander("Add labels to detected anomalies and valve events", expanded=True):
-                            st.subheader("Fault Labels")
-                            for item in report_data:
-                                if item['count'] > 0:
-                                    analysis_id = analysis_ids[item['name']]
-                                    
-                                    with st.form(key=f"label_form_{analysis_id}"):
-                                        st.write(f"**{item['name']} Anomaly** ({item['count']} points detected)")
-                                        user_label = st.text_input(
-                                            "Enter fault label:",
-                                            key=f"txt_label_{analysis_id}",
-                                            placeholder="e.g., Valve sticking, Pressure spike, etc."
-                                        )
-                                        
-                                        submitted = st.form_submit_button("Save Label")
-                                        
-                                        if submitted:
-                                            if user_label.strip():
-                                                try:
-                                                    cursor.execute(
-                                                        "INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)",
-                                                        (analysis_id, user_label.strip())
-                                                    )
-                                                    db_conn.commit()
-                                                    st.success(f"✅ Label saved: '{user_label}'")
-                                                except Exception as e:
-                                                    st.error(f"❌ Error saving label: {str(e)}")
-                                            else:
-                                                st.warning("⚠️ Please enter a label before saving.")
-                                    
-                                    # Show existing labels for this analysis
-                                    existing_labels = cursor.execute(
-                                        "SELECT label_text FROM labels WHERE analysis_id = ?",
-                                        (analysis_id,)
-                                    ).fetchall()
-                                    
-                                    if existing_labels:
-                                        labels_text = ", ".join([label[0] for label in existing_labels])
-                                        st.info(f"📝 Existing labels: {labels_text}")
-                            
-                            st.subheader("Mark Valve Open/Close Events")
-                            for item in report_data:
-                                if item['name'] != 'Pressure':  # Only for valves
-                                    analysis_id = analysis_ids[item['name']]
-                                    
-                                    # Use a form to prevent automatic reruns
-                                    with st.form(key=f"valve_form_{analysis_id}"):
-                                        st.write(f"**{item['name']} Valve Events:**")
-                                        
-                                        cols = st.columns([1, 1])
-                                        with cols[0]:
-                                            open_angle = st.number_input(
-                                                "Open Angle (degrees)", 
-                                                key=f"open_{analysis_id}",
-                                                value=None,
-                                                format="%.2f",
-                                                help="Enter the crank angle where the valve opens"
-                                            )
-                                        with cols[1]:
-                                            close_angle = st.number_input(
-                                                "Close Angle (degrees)", 
-                                                key=f"close_{analysis_id}",
-                                                value=None,
-                                                format="%.2f",
-                                                help="Enter the crank angle where the valve closes"
-                                            )
-                                        
-                                        # Form submit button - only triggers on explicit submission
-                                        submitted = st.form_submit_button(f"Save Events for {item['name']}")
-                                        
-                                        if submitted:
-                                            # Validate angles
-                                            valid_open = validate_angle(open_angle, f"{item['name']} Open")
-                                            valid_close = validate_angle(close_angle, f"{item['name']} Close")
-                                            
-                                            if valid_open and valid_close:
-                                                try:
-                                                    # Clear existing events for this analysis
-                                                    cursor.execute("DELETE FROM valve_events WHERE analysis_id = ?", (analysis_id,))
-                                                    
-                                                    events_saved = []
-                                                    if open_angle is not None:
-                                                        cursor.execute(
-                                                            "INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)",
-                                                            (analysis_id, 'open', open_angle)
-                                                        )
-                                                        events_saved.append(f"Open at {open_angle}°")
-                                                    
-                                                    if close_angle is not None:
-                                                        cursor.execute(
-                                                            "INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)",
-                                                            (analysis_id, 'close', close_angle)
-                                                        )
-                                                        events_saved.append(f"Close at {close_angle}°")
-                                                    
-                                                    db_conn.commit()
-                                                    
-                                                    if events_saved:
-                                                        st.success(f"✅ Events saved for {item['name']}: {', '.join(events_saved)}")
-                                                    else:
-                                                        st.warning("ℹ️ No events to save. Please enter angle values.")
-                                                        
-                                                except Exception as e:
-                                                    st.error(f"❌ Error saving events: {str(e)}")
-                                    
-                                    # Show current events for this valve (outside the form)
-                                    current_events = cursor.execute(
-                                        "SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ? ORDER BY crank_angle",
-                                        (analysis_id,)
-                                    ).fetchall()
-                                    
-                                    if current_events:
-                                        events_text = ", ".join([f"{event[0].capitalize()}: {event[1]}°" for event in current_events])
-                                        st.info(f"🔧 Current events for {item['name']}: {events_text}")
-                                    
-                                    st.divider()  # Visual separator between valves
-
-                        st.header("📝 Diagnostic Summary")
-                        cylinder_index = int(re.search(r'\d+', selected_cylinder_name).group())
-                        discharge_temp = extract_temperature(files_content['levels'], cylinder_index)
-                        st.markdown(f"**Machine ID:** {machine_id} | **Operating RPM:** {rpm} | **Discharge Temp:** {discharge_temp}")
-                        st.markdown(f"**Data Points Analyzed:** {len(df):,}")
-                        st.markdown("--- \n ### Anomaly Summary")
-                        for item in report_data:
-                            status_icon = "🔴" if item['count'] > 0 else "🟢"
-                            st.markdown(f"{status_icon} **{item['name']} Anomalies:** {item['count']} points (Threshold: {item['threshold']:.2f} {item['unit']})")
-
-                        st.header("📋 Compressor Health Report")
+                        # Health Report Table
+                        st.subheader("📋 Compressor Health Report")
+                        cylinder_index = int(re.search(r'\d+', cylinder_name).group())
                         health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
                         if not health_report_df.empty:
                             st.dataframe(health_report_df, use_container_width=True, hide_index=True)
-                        
-                        # PDF Generation Section
-                        st.header("📄 Export Report")
-                        
-                        if REPORTLAB_AVAILABLE:
-                            button_text = "🔄 Generate PDF Report"
-                            file_extension = "pdf"
-                            mime_type = "application/pdf"
-                        else:
-                            button_text = "🔄 Generate HTML Report"
-                            file_extension = "html"
-                            mime_type = "text/html"
-                            st.info("💡 Install `reportlab` for PDF generation: `pip install reportlab`")
-                        
-                        if st.button(button_text, type="primary"):
-                            try:
-                                with st.spinner("Generating report..."):
-                                    report_buffer = generate_pdf_report(machine_id, rpm, selected_cylinder_name, report_data, health_report_df, fig)
-                                
-                                download_label = f"📥 Download {file_extension.upper()} Report"
-                                filename = f"diagnostics_report_{machine_id}_{selected_cylinder_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
-                                
-                                st.download_button(
-                                    label=download_label,
-                                    data=report_buffer.getvalue(),
-                                    file_name=filename,
-                                    mime=mime_type
-                                )
-                                st.success(f"✅ {file_extension.upper()} report generated successfully!")
-                            except Exception as e:
-                                st.error(f"❌ Error generating report: {str(e)}")
-                        
-                        st.header("🔧 Cylinder Details")
-                        all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
-                        if all_details:
-                            cols = st.columns(len(all_details))
-                            for i, detail in enumerate(all_details):
-                                with cols[i]:
-                                    st.markdown(f"""
-                                    <div class="detail-card">
-                                        <h5>{detail['name']}</h5>
-                                        <div class="detail-item"><span>Bore:</span> <strong>{detail['bore']}</strong></div>
-                                        <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
-                                        <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
-                                        <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
-                                        <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
-                                        <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
-                                        <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
+
+                        # Anomaly Labeling
+                        with st.expander("Add labels and mark valve events"):
+                            for item in report_data:
+                                if item['count'] > 0:
+                                    analysis_id = analysis_ids[item['name']]
+                                    with st.form(key=f"label_form_{analysis_id}"):
+                                        st.write(f"**{item['name']} Anomaly** ({item['count']} points detected)")
+                                        user_label = st.text_input("Enter fault label:", key=f"txt_label_{analysis_id}")
+                                        if st.form_submit_button("Save Label"):
+                                            if user_label.strip():
+                                                safe_db_operation("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", analysis_id, user_label.strip())
+                                                st.success(f"Label saved for {item['name']}: '{user_label}'")
+                            
+                            for item in report_data:
+                                if item['name'] != 'Pressure':
+                                    analysis_id = analysis_ids[item['name']]
+                                    with st.form(key=f"valve_form_{analysis_id}"):
+                                        st.write(f"**{item['name']} Valve Events:**")
+                                        cols = st.columns(2)
+                                        open_angle = cols[0].number_input("Open Angle", key=f"open_{analysis_id}", value=None, format="%.2f")
+                                        close_angle = cols[1].number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%.2f")
+                                        if st.form_submit_button(f"Save Events for {item['name']}"):
+                                            safe_db_operation("DELETE FROM valve_events WHERE analysis_id = ?", analysis_id)
+                                            if open_angle is not None:
+                                                safe_db_operation("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", analysis_id, 'open', open_angle)
+                                            if close_angle is not None:
+                                                safe_db_operation("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", analysis_id, 'close', close_angle)
+                                            st.success(f"Events updated for {item['name']}.")
+
+                        # Store info for consolidated report
+                        all_cylinders_report_info.append({
+                            "name": cylinder_name,
+                            "fig": fig,
+                            "report_data": report_data,
+                            "health_report_df": health_report_df
+                        })
+
+                    # --- Consolidated Export and Details Section ---
+                    st.markdown("---")
+                    st.header("📄 Export Consolidated Report")
+                    if st.button("🔄 Generate Full Report", type="primary"):
+                        with st.spinner("Generating consolidated report..."):
+                            report_buffer = generate_pdf_report(machine_id, rpm, all_cylinders_report_info)
+                            file_ext = "pdf" if REPORTLAB_AVAILABLE else "html"
+                            st.download_button(
+                                label=f"📥 Download {file_ext.upper()} Report",
+                                data=report_buffer.getvalue(),
+                                file_name=f"consolidated_report_{machine_id}_{datetime.datetime.now().strftime('%Y%m%d')}.{file_ext}",
+                                mime="application/pdf" if REPORTLAB_AVAILABLE else "text/html"
+                            )
+                    
+                    st.header("🔧 All Cylinder Details")
+                    all_details = get_all_cylinder_details(files_content['source'], files_content['levels'], len(cylinders))
+                    if all_details:
+                        cols = st.columns(len(all_details) or 1)
+                        for i, detail in enumerate(all_details):
+                            with cols[i]:
+                                st.markdown(f"""
+                                <div class="detail-card">
+                                    <h5>{detail['name']}</h5>
+                                    <div class="detail-item"><span>Bore:</span> <strong>{detail['bore']}</strong></div>
+                                    <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
+                                    <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
+                                    <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
+                                    <div class="detail-item"><span>Discharge Pressure:</span> <strong>{detail['discharge_pressure']}</strong></div>
+                                    <div class="detail-item"><span>Flow Balance (CE):</span> <strong>{detail['flow_balance_ce']}</strong></div>
+                                    <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
+                                </div>
+                                """, unsafe_allow_html=True)
+
             elif df is None:
-                # Error messages are already shown in the loading functions
-                pass
+                st.error("Failed to load data from Curves.xml. Cannot proceed.")
             else:
                 st.error("Could not discover a valid machine configuration from the provided files.")
 
         except Exception as e:
             st.error(f"❌ An error occurred during processing. Please check the files. Details: {e}")
-            st.exception(e)  # Show full traceback for debugging
+            st.exception(e)
     else:
         st.sidebar.error("❌ Upload failed. Please ensure you upload one of each file type: 'Curves', 'Levels', and 'Source'.")
 elif uploaded_files:
@@ -1025,37 +856,13 @@ try:
         labels_df = pd.DataFrame(all_labels, columns=['Timestamp', 'Machine ID', 'Cylinder', 'Curve', 'Label'])
         st.dataframe(labels_df, use_container_width=True)
         
-        # Export options
         col1, col2 = st.columns(2)
-        with col1:
-            csv_data = labels_df.to_csv(index=False)
-            st.download_button(
-                label="📊 Download Labels as CSV",
-                data=csv_data,
-                file_name=f"anomaly_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+        csv_data = labels_df.to_csv(index=False).encode('utf-8')
+        col1.download_button("📊 Download Labels as CSV", csv_data, "anomaly_labels.csv", "text/csv")
         
-        with col2:
-            json_data = labels_df.to_json(orient='records', indent=2)
-            st.download_button(
-                label="📋 Download Labels as JSON",
-                data=json_data,
-                file_name=f"anomaly_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
+        json_data = labels_df.to_json(orient='records', indent=2).encode('utf-8')
+        col2.download_button("📋 Download Labels as JSON", json_data, "anomaly_labels.json", "application/json")
         
-        # Summary statistics
-        st.subheader("📊 Labels Summary")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Labels", len(all_labels))
-        with col2:
-            unique_machines = labels_df['Machine ID'].nunique()
-            st.metric("Unique Machines", unique_machines)
-        with col3:
-            unique_cylinders = labels_df['Cylinder'].nunique()
-            st.metric("Unique Cylinders", unique_cylinders)
     else:
         st.info("📝 No labels found. Start analyzing data and adding labels to build your diagnostic knowledge base.")
 
