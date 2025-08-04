@@ -398,21 +398,10 @@ def extract_rpm(_levels_xml_content):
     """Extract machine RPM from the Levels.xml file."""
     try:
         root = ET.fromstring(_levels_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
-        if ws_levels is None: return "N/A"
-        
-        table = ws_levels.find('.//ss:Table', NS)
-        rows = table.findall('ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            if cells and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                if "RPM" in cell_text and "RATED" not in cell_text:
-                    for cell in cells[1:]:
-                         data_node = cell.find('ss:Data', NS)
-                         if data_node is not None and data_node.text:
-                             return f"{float(data_node.text):.0f}"
+        # Use the robust find_xml_value function to get RPM
+        rpm_str = find_xml_value(root, 'Levels', 'RPM', 1)
+        if rpm_str != "N/A":
+            return f"{float(rpm_str):.0f}"
     except Exception:
         return "N/A"
     return "N/A"
@@ -440,26 +429,16 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
     """
     try:
         source_root = ET.fromstring(_source_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         
-        machine_id = ""
-        num_cylinders = 0
-
-        # Use the robust find function to get number of cylinders
+        # Use the robust find function to get number of cylinders and machine ID
         num_cyl_str = find_xml_value(source_root, 'Source', "COMPRESSOR NUMBER OF CYLINDERS", 2)
-        if num_cyl_str != "N/A":
-            num_cylinders = int(num_cyl_str)
-        
-        machine_id_str = find_xml_value(source_root, 'Source', "Machine", 1)
-        if machine_id_str != "N/A":
-            machine_id = machine_id_str
-        
-        if num_cylinders == 0:
+        machine_id = find_xml_value(source_root, 'Source', "Machine", 1)
+
+        if num_cyl_str == "N/A" or int(num_cyl_str) == 0:
             st.warning("Could not determine number of cylinders from Source.xml.")
             return None
-
-        # The list of available curves is now passed directly to the function.
-        # No need to re-parse Curves.xml.
+        
+        num_cylinders = int(num_cyl_str)
         
         cylinders_config = []
         for i in range(1, num_cylinders + 1):
@@ -488,27 +467,57 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
 
-# --- New, Robust Data Extraction Functions ---
+# --- CORRECTED Data Extraction Function ---
 def find_xml_value(root, sheet_name, partial_key, col_offset):
-    """Robustly finds a value in a worksheet by row label (partial match) and column index."""
+    """
+    Robustly finds a value in a worksheet by row label (partial match) and column index.
+    This version correctly handles sparse rows with `ss:Index` attributes.
+    """
     try:
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-        if ws is None: return "N/A"
+        if ws is None: 
+            return "N/A"
         
         rows = ws.findall('.//ss:Row', NS)
         for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            # Check if first cell exists and contains the partial key
-            if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip().upper()
-                # Use partial matching ('in') instead of exact ('==')
-                if partial_key.upper() in cell_text:
-                    value_node = cells[col_offset].find('ss:Data', NS)
-                    return value_node.text if value_node is not None and value_node.text else "N/A"
-        return "N/A"
+            # First, quickly check if the key matches in the first cell
+            all_cells_in_row = row.findall('ss:Cell', NS)
+            if not all_cells_in_row:
+                continue
+            
+            first_cell_data_node = all_cells_in_row[0].find('ss:Data', NS)
+            if first_cell_data_node is None or first_cell_data_node.text is None:
+                continue
+
+            cell_text = (first_cell_data_node.text or "").strip().upper()
+            if partial_key.upper() not in cell_text:
+                continue
+
+            # If the key matches, now we build a dense representation of the row to handle ss:Index
+            dense_cells = {}
+            current_idx = 0
+            for cell in all_cells_in_row:
+                # The ss:Index attribute is 1-based, so we convert to 0-based
+                ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
+                if ss_index_str:
+                    current_idx = int(ss_index_str) - 1
+                
+                dense_cells[current_idx] = cell
+                current_idx += 1
+
+            # Now check if the required column exists in our dense representation
+            if col_offset in dense_cells:
+                value_node = dense_cells[col_offset].find('ss:Data', NS)
+                return value_node.text if value_node is not None and value_node.text else "N/A"
+            else:
+                # If we matched the key but the specific column doesn't exist, it's N/A for this row
+                return "N/A"
+
+        return "N/A" # Return N/A if no row with the key was found
     except Exception:
         return "N/A"
+
 
 def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
     """Generates a DataFrame for the health report table using robust parsing."""
@@ -759,11 +768,14 @@ if uploaded_files and len(uploaded_files) == 3:
             if df is not None and discovered_config:
                 rpm = extract_rpm(files_content['levels'])
                 machine_id = discovered_config.get('machine_id', 'N/A')
-                cursor = db_conn.cursor()
-                cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
-                db_conn.commit()
-                st.session_state.active_session_id = cursor.lastrowid
-                st.success(f"✅ New analysis session #{st.session_state.active_session_id} created.")
+                
+                # Only create a new session if one isn't active
+                if st.session_state.active_session_id is None:
+                    cursor = db_conn.cursor()
+                    cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
+                    db_conn.commit()
+                    st.session_state.active_session_id = cursor.lastrowid
+                    st.success(f"✅ New analysis session #{st.session_state.active_session_id} created.")
 
                 cylinders = discovered_config.get("cylinders", [])
                 if not cylinders:
@@ -779,6 +791,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
                         analysis_ids = {}
+                        cursor = db_conn.cursor()
                         for item in temp_report_data:
                             cursor.execute( "INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
                                 (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
@@ -993,6 +1006,7 @@ st.header("📋 All Saved Labels")
 st.markdown("Historical data from all analysis sessions.")
 
 try:
+    cursor = db_conn.cursor()
     query = """
     SELECT s.timestamp, s.machine_id, a.cylinder_name, a.curve_name, l.label_text 
     FROM labels l 
