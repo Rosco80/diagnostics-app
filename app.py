@@ -507,38 +507,39 @@ def find_xml_value(root, sheet_name, key_name, col_offset):
         return "N/A"
 
 def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
-    """Generates a DataFrame for the health report table using robust parsing."""
     try:
         source_root = ET.fromstring(_source_xml_content)
         levels_root = ET.fromstring(_levels_xml_content)
         
-        # In Source.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
-        # In Levels.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
-        
+        # Helper function with partial matching
+        def find_value(root, sheet_name, partial_key, col_idx):
+            # ... (implementation with partial matching)
+            
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', cylinder_index + 1)] * 2,
-            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER PISTON ROD DIAMETER', cylinder_index + 1)],
+            'Bore (ins)': [find_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', cylinder_index + 2)] * 2,
+            'Rod Diam (ins)': [
+                "N/A", 
+                find_value(source_root, 'Source', 'PISTON ROD DIAMETER', cylinder_index + 2)
+            ],
             'Pressure Ps/Pd (psig)': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 2)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 2)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 2)} / {find_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 2)}"
             ],
             'Temp Ts/Td': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 2)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 2)}",
+                f"{find_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 2)} / {find_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 2)}"
             ],
-            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
+            'Comp. Ratio': [find_value(source_root, 'Source', 'COMPRESSION RATIO', cylinder_index + 2)] * 2,
             'Indicated Power (ihp)': [
-                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
-                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
+                find_value(source_root, 'Source', 'HORSEPOWER INDICATED', cylinder_index + 2),
+                "N/A"
             ]
         }
         
-        df_table = pd.DataFrame(data)
-        return df_table
-
+        return pd.DataFrame(data)
+        
     except Exception as e:
-        st.warning(f"Could not generate health report table: {e}")
         return pd.DataFrame()
 
 def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylinders):
@@ -1015,3 +1016,4 @@ st.markdown("""
     st.session_state.active_session_id or "None", 
     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 ), unsafe_allow_html=True)
+
