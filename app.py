@@ -594,6 +594,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
 
     ax2 = ax1.twinx()
     colors = plt.cm.viridis(np.linspace(0, 1, len(valve_curves)))
+    cursor = db_conn.cursor()
     
     current_offset = 0
     for i, vc in enumerate(valve_curves):
@@ -601,6 +602,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
         label_name = vc['name']
         vibration_data = df[curve_name] + current_offset
         
+        # Plot the vibration signal envelope
         if envelope_view:
             ax2.plot(df['Crank Angle'], vibration_data, color=colors[i], linewidth=0.5)
             ax2.plot(df['Crank Angle'], -df[curve_name] + current_offset, color=colors[i], linewidth=0.5)
@@ -608,21 +610,27 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
         else:
             ax2.plot(df['Crank Angle'], vibration_data, label=label_name, color=colors[i], linewidth=1.5)
             ax2.fill_between(df['Crank Angle'], vibration_data.min(), vibration_data.max(), where=df[f'{curve_name}_anom'], color=colors[i], alpha=0.3, interpolate=True)
-        current_offset += vertical_offset
+        
+        # Check for and plot valve events for this specific valve
+        analysis_id = analysis_ids.get(vc['name'])
+        if analysis_id:
+            events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
+            # Define a y-position for the text marker just above the current signal's envelope
+            max_vibration_for_curve = df[curve_name].max()
+            text_y_position = max_vibration_for_curve + current_offset + 0.2 
+            
+            for event_type, crank_angle in events:
+                # Draw vertical line across the whole plot
+                line_color = 'g' if event_type == 'open' else 'r'
+                ax1.axvline(x=crank_angle, color=line_color, linestyle='--', linewidth=1.5)
+                # Place text marker on the vibration axis (ax2) at the correct vertical offset
+                ax2.text(crank_angle, text_y_position, 
+                         'O' if event_type == 'open' else 'C', 
+                         color=line_color, 
+                         fontsize=14, weight='bold', ha='center', va='bottom',
+                         bbox=dict(boxstyle="circle,pad=0.2", fc="white", ec=line_color, lw=2))
 
-    cursor = db_conn.cursor()
-    for item in report_data:
-        if item['name'] != 'Pressure':
-            analysis_id = analysis_ids.get(item['name'])
-            if analysis_id:
-                events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
-                for event_type, crank_angle in events:
-                    if event_type == 'open':
-                        ax1.axvline(x=crank_angle, color='g', linestyle='--', linewidth=2)
-                        ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'O', color='g', fontsize=12, weight='bold')
-                    elif event_type == 'close':
-                        ax1.axvline(x=crank_angle, color='r', linestyle='--', linewidth=2)
-                        ax1.text(crank_angle + 2, ax1.get_ylim()[1]*0.9, 'C', color='r', fontsize=12, weight='bold')
+        current_offset += vertical_offset
 
     ax2.set_ylabel('Vibration (G) with Offset', color='blue', fontsize=14)
     ax2.tick_params(axis='y', labelcolor='blue')
@@ -924,3 +932,4 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
