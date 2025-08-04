@@ -840,6 +840,4 @@ st.markdown("""
 """.format(
     st.session_state.active_session_id or "None", 
     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-), unsafe_allow_html=True)
-"""" and I want to make some changes to it.
-Can you remove the selection and make the chang
+), unsafe_allow_html=Tr
