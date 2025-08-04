@@ -53,6 +53,19 @@ except ImportError:
     REPORTLAB_AVAILABLE = False
     st.warning("⚠️ ReportLab not installed. PDF generation will be limited to HTML format. Install with: `pip install reportlab`")
 
+# Standard fault labels for the dropdown menu
+FAULT_LABELS = [
+    "Valve Leakage",
+    "Valve Wear",
+    "Valve Sticking or Fouling",
+    "Valve Impact or Slamming",
+    "Broken or Missing Valve Parts",
+    "Valve Misalignment",
+    "Spring Fatigue or Failure",
+    "Other"  # Allows for custom input
+]
+
+
 # --- Database Setup ---
 
 def init_db():
@@ -725,8 +738,6 @@ if uploaded_files and len(uploaded_files) == 3:
                     selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
 
                     if selected_cylinder_config:
-                        # ... inside the `if selected_cylinder_config:` block
-
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
                         analysis_ids = {}
@@ -768,20 +779,8 @@ if uploaded_files and len(uploaded_files) == 3:
                             st.dataframe(health_report_df, use_container_width=True, hide_index=True)
 
                         with st.expander("Add labels and mark valve events"):
-                           st.subheader("Fault Labels")
+                            st.subheader("Fault Labels")
                             
-                            # Define the standard fault labels for the dropdown
-                            FAULT_LABELS = [
-                                "Valve Leakage",
-                                "Valve Wear",
-                                "Valve Sticking or Fouling",
-                                "Valve Impact or Slamming",
-                                "Broken or Missing Valve Parts",
-                                "Valve Misalignment",
-                                "Spring Fatigue or Failure",
-                                "Other"  # Allows for custom input
-                            ]
-
                             for item in report_data:
                                 if item['count'] > 0:
                                     analysis_id = analysis_ids[item['name']]
@@ -791,7 +790,7 @@ if uploaded_files and len(uploaded_files) == 3:
                                         # Use a selectbox for standard labels
                                         selected_label = st.selectbox(
                                             "Select fault label:",
-                                            options=FAULT_LABELS,
+                                            options=FAULT_LABELS, # References the list from the top
                                             key=f"sel_label_{analysis_id}"
                                         )
                                         
@@ -831,6 +830,7 @@ if uploaded_files and len(uploaded_files) == 3:
                                             if close_angle is not None:
                                                 safe_db_operation("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", analysis_id, 'close', close_angle)
                                             st.success(f"✅ Events updated for {item['name']}.")
+                                            st.rerun() # Rerun to show the updated plot immediately
 
                         st.header("📄 Export Report")
                         if st.button("🔄 Generate Report for this Cylinder", type="primary"):
@@ -924,6 +924,3 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
-
-
-
