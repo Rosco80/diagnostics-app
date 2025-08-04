@@ -503,6 +503,18 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
             except (ValueError, TypeError):
                 return kpa_str
 
+        def format_flow_balance(value_str):
+            """Converts flow balance ratio string to a formatted percentage string."""
+            if value_str == "N/A" or not value_str:
+                return "N/A"
+            try:
+                # The value from XML is a ratio (e.g., 1.015). Convert to percentage.
+                percent_val = float(value_str) * 100
+                return f"{percent_val:.1f} %"
+            except (ValueError, TypeError):
+                # If it's not a number, return it as is
+                return value_str
+
         # --- Fetch Stage-Level Data (single value for all cylinders) ---
         # Note: col_offset=2 because value is in the 3rd cell (index 2).
         stage_suction_p_psi = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE GAUGE', 2))
@@ -512,6 +524,10 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
         for i in range(1, num_cylinders + 1):
             col_idx = i + 1
             
+            # Fetch flow balance values first
+            fb_ce_raw = find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=1)
+            fb_he_raw = find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=2)
+            
             detail = {
                 "name": f"Cylinder {i}",
                 "bore": f"{find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)} in",
@@ -519,14 +535,12 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
                 "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'COMP CYL, DISCHARGE TEMPERATURE', col_idx)} °C",
                 "suction_pressure": f"{stage_suction_p_psi} psig",
                 "discharge_pressure": f"{stage_discharge_p_psi} psig",
-                # Use occurrence=1 for CRANK END (first match of "FLOW BALANCE" in Source.xml)
-                "flow_balance_ce": f"{find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=1)} %",
-                # Use occurrence=2 for HEAD END (second match of "FLOW BALANCE" in Source.xml)
-                "flow_balance_he": f"{find_xml_value(source_root, 'Source', 'FLOW BALANCE', col_idx, occurrence=2)} %"
+                "flow_balance_ce": format_flow_balance(fb_ce_raw),
+                "flow_balance_he": format_flow_balance(fb_he_raw)
             }
 
             for key, value in detail.items():
-                if "N/A" in str(value) or not value.strip():
+                if "N/A" in str(value) or not str(value).strip():
                     detail[key] = "N/A"
             
             details.append(detail)
