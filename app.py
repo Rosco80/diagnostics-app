@@ -406,25 +406,16 @@ def extract_rpm(_levels_xml_content):
 def extract_temperature(_levels_xml_content, cylinder_index):
     """Extracts discharge temperature for a specific cylinder index."""
     try:
-        root = ET.fromstring(_levels_xml_content)
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-        ws_levels = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Levels'), None)
-        if ws_levels is None: return "N/A"
+        levels_root = ET.fromstring(_levels_xml_content)
+        # For Cylinder 1, data is in column index 2. So offset is cylinder_index + 1
+        col_idx = cylinder_index + 1
+        temp_str = find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', col_idx)
         
-        table = ws_levels.find('.//ss:Table', NS)
-        rows = table.findall('ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            # Data for cylinder 'n' is in column n+1 (e.g., Cyl 1 is in col index 2)
-            if len(cells) > cylinder_index + 1 and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                if "DISCHARGE TEMPERATURE" in cell_text:
-                    temp_node = cells[cylinder_index + 1].find('ss:Data', NS)
-                    if temp_node is not None and temp_node.text:
-                        return f"{float(temp_node.text):.1f}°C"
-    except (ValueError, IndexError):
+        if temp_str != "N/A":
+            return f"{float(temp_str):.1f}°C"
         return "N/A"
-    return "N/A"
+    except (ValueError, TypeError):
+        return "N/A"
 
 @st.cache_data
 def auto_discover_configuration(_source_xml_content, _curves_xml_content):
@@ -438,15 +429,14 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         machine_id = ""
         num_cylinders = 0
 
-        rows = source_root.findall('.//ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            if len(cells) > 1 and cells[0].find('ss:Data', NS) is not None:
-                key = (cells[0].find('ss:Data', NS).text or "").strip()
-                if key == "Machine":
-                    machine_id = cells[1].find('ss:Data', NS).text
-                elif key == "COMPRESSOR NUMBER OF CYLINDERS":
-                    num_cylinders = int(cells[2].find('ss:Data', NS).text)
+        # Use the robust find function to get number of cylinders
+        num_cyl_str = find_xml_value(source_root, 'Source', "COMPRESSOR NUMBER OF CYLINDERS", 2)
+        if num_cyl_str != "N/A":
+            num_cylinders = int(num_cyl_str)
+        
+        machine_id_str = find_xml_value(source_root, 'Source', "Machine", 1)
+        if machine_id_str != "N/A":
+            machine_id = machine_id_str
         
         if num_cylinders == 0:
             st.warning("Could not determine number of cylinders from Source.xml.")
@@ -487,8 +477,8 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
         return None
 
 # --- New, Robust Data Extraction Functions ---
-def find_xml_value(root, sheet_name, key_name, col_offset):
-    """Robustly finds a value in a worksheet by row label and column index."""
+def find_xml_value(root, sheet_name, partial_key, col_offset):
+    """Robustly finds a value in a worksheet by row label (partial match) and column index."""
     try:
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
@@ -497,9 +487,11 @@ def find_xml_value(root, sheet_name, key_name, col_offset):
         rows = ws.findall('.//ss:Row', NS)
         for row in rows:
             cells = row.findall('ss:Cell', NS)
+            # Check if first cell exists and contains the partial key
             if len(cells) > col_offset and cells[0].find('ss:Data', NS) is not None:
-                cell_text = (cells[0].find('ss:Data', NS).text or "").strip()
-                if cell_text == key_name:
+                cell_text = (cells[0].find('ss:Data', NS).text or "").strip().upper()
+                # Use partial matching ('in') instead of exact ('==')
+                if partial_key.upper() in cell_text:
                     value_node = cells[col_offset].find('ss:Data', NS)
                     return value_node.text if value_node is not None and value_node.text else "N/A"
         return "N/A"
@@ -512,25 +504,32 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         source_root = ET.fromstring(_source_xml_content)
         levels_root = ET.fromstring(_levels_xml_content)
         
-        # In Source.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
-        # In Levels.xml, data columns start at index 2 (0=Label, 1=Unit, 2=Cyl1...)
+        # For Cylinder 1, data is in col index 2. So offset is cylinder_index + 1
+        col_idx = cylinder_index + 1
+
+        def convert_kpa_to_psi(kpa_str):
+            if kpa_str == "N/A" or not kpa_str: return "N/A"
+            try:
+                # Convert KPA to PSI
+                return f"{float(kpa_str) * 0.145038:.1f}"
+            except (ValueError, TypeError):
+                return kpa_str  # Return original if not a number
+        
+        suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', col_idx))
+        discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', col_idx))
         
         data = {
             'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'],
-            'Bore (ins)': [find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', cylinder_index + 1)] * 2,
-            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER PISTON ROD DIAMETER', cylinder_index + 1)],
-            'Pressure Ps/Pd (psig)': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', cylinder_index + 1)}"
-            ],
-            'Temp Ts/Td': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}",
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', cylinder_index + 1)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', cylinder_index + 1)}"
-            ],
-            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', cylinder_index + 1)] * 2,
+            'Bore (ins)': [find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)] * 2,
+            'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', 'PISTON ROD DIAMETER', col_idx)],
+            'Pressure Ps/Pd (psig)': [f"{suction_p} / {discharge_p}"] * 2,
+            'Temp Ts/Td (°C)': [
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', col_idx)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', col_idx)}"
+            ] * 2,
+            'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', col_idx)] * 2,
             'Indicated Power (ihp)': [
-                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', cylinder_index + 1),
-                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', cylinder_index + 1)
+                find_xml_value(levels_root, 'Levels', 'HEAD END INDICATED HORSEPOWER', col_idx),
+                find_xml_value(levels_root, 'Levels', 'CRANK END INDICATED HORSEPOWER', col_idx)
             ]
         }
         
@@ -548,17 +547,36 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
         source_root = ET.fromstring(_source_xml_content)
         levels_root = ET.fromstring(_levels_xml_content)
 
+        def convert_kpa_to_psi(kpa_str):
+            if kpa_str == "N/A" or not kpa_str: return "N/A"
+            try:
+                # Convert KPA to PSI
+                return f"{float(kpa_str) * 0.145038:.1f}"
+            except (ValueError, TypeError):
+                return kpa_str
+
         for i in range(1, num_cylinders + 1):
+            col_idx = i + 1 # Column for Cyl i is at index i+1
+            
+            suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', col_idx))
+            discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', col_idx))
+
             detail = {
                 "name": f"Cylinder {i}",
-                "bore": find_xml_value(source_root, 'Source', f'COMPRESSOR CYLINDER BORE', i + 1),
-                "suction_temp": find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', i + 1),
-                "discharge_temp": find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', i + 1),
-                "suction_pressure": find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', i + 1),
-                "discharge_pressure": find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', i + 1),
-                "flow_balance_ce": find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', i + 1),
-                "flow_balance_he": find_xml_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', i + 1)
+                "bore": f"{find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)} in",
+                "suction_temp": f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', col_idx)} °C",
+                "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', col_idx)} °C",
+                "suction_pressure": f"{suction_p} psig",
+                "discharge_pressure": f"{discharge_p} psig",
+                "flow_balance_ce": f"{find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', col_idx)} %",
+                "flow_balance_he": f"{find_xml_value(levels_root, 'Levels', 'HEAD END FLOW BALANCE', col_idx)} %"
             }
+
+            # Clean up display for N/A values
+            for key, value in detail.items():
+                if "N/A" in str(value):
+                    detail[key] = "N/A"
+            
             details.append(detail)
         return details
     except Exception as e:
@@ -650,6 +668,7 @@ st.markdown("""
     border-radius: 0.5rem;
     padding: 1rem;
     margin-bottom: 1rem;
+    height: 100%;
 }
 .detail-card h5 {
     color: #007bff;
@@ -881,7 +900,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         st.header("📋 Compressor Health Report")
                         health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
                         if not health_report_df.empty:
-                            st.dataframe(health_report_df, use_container_width=True)
+                            st.dataframe(health_report_df, use_container_width=True, hide_index=True)
                         
                         # PDF Generation Section
                         st.header("📄 Export Report")
@@ -899,7 +918,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         if st.button(button_text, type="primary"):
                             try:
                                 with st.spinner("Generating report..."):
-                                    report_buffer = generate_pdf_report(machine_id, rpm, selected_cylinder_name, report_data, health_report_df)
+                                    report_buffer = generate_pdf_report(machine_id, rpm, selected_cylinder_name, report_data, health_report_df, fig)
                                 
                                 download_label = f"📥 Download {file_extension.upper()} Report"
                                 filename = f"diagnostics_report_{machine_id}_{selected_cylinder_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
@@ -923,7 +942,7 @@ if uploaded_files and len(uploaded_files) == 3:
                                     st.markdown(f"""
                                     <div class="detail-card">
                                         <h5>{detail['name']}</h5>
-                                        <div class="detail-item"><span>BORE:</span> <strong>{detail['bore']}</strong></div>
+                                        <div class="detail-item"><span>Bore:</span> <strong>{detail['bore']}</strong></div>
                                         <div class="detail-item"><span>Suction Temp:</span> <strong>{detail['suction_temp']}</strong></div>
                                         <div class="detail-item"><span>Discharge Temp:</span> <strong>{detail['discharge_temp']}</strong></div>
                                         <div class="detail-item"><span>Suction Pressure:</span> <strong>{detail['suction_pressure']}</strong></div>
