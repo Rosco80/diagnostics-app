@@ -251,6 +251,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
     pressure_curve = cylinder_config.get('pressure_curve')
     valve_curves = cylinder_config.get('valve_vibration_curves', [])
     report_data = []
+
     if pressure_curve in df.columns:
         pres_mean, pres_std = df[pressure_curve].mean(), df[pressure_curve].std()
         pres_thresh = pres_mean + 2 * pres_std
@@ -268,27 +269,6 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
     fig.add_trace(go.Scatter(x=df['Crank Angle'], y=df[pressure_curve], name='Pressure (PSI)', line=dict(color='black', width=2)), secondary_y=False)
     colors = plt.cm.viridis(np.linspace(0, 1, len(valve_curves)))
     current_offset = 0
-    for i, vc in enumerate(valve_curves):
-        curve_name, label_name = vc['curve'], vc['name']
-        color_rgba = f'rgba({colors[i][0]*255},{colors[i][1]*255},{colors[i][2]*255},0.4)'
-        upper_bound = df[curve_name] + current_offset
-        lower_bound = -df[curve_name] + current_offset
-        fig.add_trace(go.Scatter(x=df['Crank Angle'], y=upper_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), showlegend=False, hoverinfo='none'), secondary_y=True)
-        fig.add_trace(go.Scatter(x=df['Crank Angle'], y=lower_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), fill='tonexty', fillcolor=color_rgba, name=label_name, hoverinfo='none'), secondary_y=True)
-        analysis_id = analysis_ids.get(vc['name'])
-        if analysis_id:
-            events_raw = _db_client.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).rows
-            events = {etype: angle for etype, angle in events_raw}
-            if 'open' in events and 'close' in events:
-                fig.add_vrect(x0=events['open'], x1=events['close'], fillcolor=color_rgba.replace('0.4','0.2'), layer="below", line_width=0)
-            for event_type, crank_angle in events.items():
-                fig.add_vline(x=crank_angle, line_width=2, line_dash="dash", line_color='green' if event_type == 'open' else 'red')
-        current_offset += vertical_offset
-    fig.update_layout(title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}", xaxis_title="Crank Angle (deg)", template="ggplot2", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    fig.update_yaxes(title_text="<b>Pressure (PSI)</b>", color="black", secondary_y=False)
-    fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
-    return fig, report_data
-
 # --- Main Application ---
 db_client = init_db()
 
@@ -448,3 +428,4 @@ if rs.rows:
     st.download_button("📊 Download Labels as CSV", csv_data, "anomaly_labels.csv", "text/csv")
 else:
     st.info("📝 No labels found.")
+
