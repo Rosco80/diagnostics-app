@@ -24,6 +24,16 @@ FAULT_LABELS = [
     "Valve Misalignment", "Spring Fatigue or Failure", "Other"
 ]
 
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+
 # --- Database Setup ---
 @st.cache_resource
 def init_db():
@@ -32,7 +42,6 @@ def init_db():
         url = st.secrets["TURSO_DATABASE_URL"]
         auth_token = st.secrets["TURSO_AUTH_TOKEN"]
         client = libsql_client.create_client_sync(url=url, auth_token=auth_token)
-        # Create tables if they don't exist
         client.batch([
             "CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, machine_id TEXT, rpm TEXT)",
             "CREATE TABLE IF NOT EXISTS analyses (id INTEGER PRIMARY KEY, session_id INTEGER, cylinder_name TEXT, curve_name TEXT, anomaly_count INTEGER, threshold REAL, FOREIGN KEY (session_id) REFERENCES sessions (id))",
@@ -51,6 +60,101 @@ def init_db():
 def get_last_row_id(_client):
     rs = _client.execute("SELECT last_insert_rowid()")
     return rs.rows[0][0] if rs.rows else None
+
+def find_xml_value(root, sheet_name, partial_key, col_offset, occurrence=1):
+    try:
+        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+        ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
+        if ws is None: return "N/A"
+        
+        rows = ws.findall('.//ss:Row', NS)
+        match_count = 0
+        for row in rows:
+            all_cells_in_row = row.findall('ss:Cell', NS)
+            if not all_cells_in_row: continue
+            
+            first_cell_data_node = all_cells_in_row[0].find('ss:Data', NS)
+            if first_cell_data_node is None or first_cell_data_node.text is None: continue
+
+            if partial_key.upper() in (first_cell_data_node.text or "").strip().upper():
+                match_count += 1
+                if match_count == occurrence:
+                    target_idx = col_offset + 1
+                    dense_cells = {}
+                    current_idx = 1
+                    for cell in all_cells_in_row:
+                        ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
+                        if ss_index_str: current_idx = int(ss_index_str)
+                        dense_cells[current_idx] = cell
+                        current_idx += 1
+                    
+                    if target_idx in dense_cells:
+                        value_node = dense_cells[target_idx].find('ss:Data', NS)
+                        return value_node.text if value_node is not None and value_node.text else "N/A"
+                    return "N/A"
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+@st.cache_data
+def auto_discover_configuration(_source_xml_content, all_curve_names):
+    try:
+        source_root = ET.fromstring(_source_xml_content)
+        num_cyl_str = find_xml_value(source_root, 'Source', "COMPRESSOR NUMBER OF CYLINDERS", 2)
+        machine_id = find_xml_value(source_root, 'Source', "Machine", 1)
+        if num_cyl_str == "N/A" or int(num_cyl_str) == 0: return None
+        
+        num_cylinders = int(num_cyl_str)
+        cylinders_config = []
+        for i in range(1, num_cylinders + 1):
+            pressure_curve = next((c for c in all_curve_names if f".{i}H." in c and "STATIC" in c), None) or \
+                             next((c for c in all_curve_names if f".{i}C." in c and "STATIC" in c), None)
+
+            valve_curves = [
+                {"name": f"Cyl {i} HE Discharge", "curve": next((c for c in all_curve_names if f".{i}HD" in c and "VIBRATION" in c), None)},
+                {"name": f"Cyl {i} HE Suction", "curve": next((c for c in all_curve_names if f".{i}HS" in c and "VIBRATION" in c), None)},
+                {"name": f"Cyl {i} CE Discharge", "curve": next((c for c in all_curve_names if f".{i}CD" in c and "VIBRATION" in c), None)},
+                {"name": f"Cyl {i} CE Suction", "curve": next((c for c in all_curve_names if f".{i}CS" in c and "VIBRATION" in c), None)}
+            ]
+            if pressure_curve and any(vc['curve'] for vc in valve_curves):
+                cylinders_config.append({"cylinder_name": f"Cylinder {i}", "pressure_curve": pressure_curve, "valve_vibration_curves": [vc for vc in valve_curves if vc['curve']]})
+        
+        return {"machine_id": machine_id, "cylinders": cylinders_config}
+    except Exception as e:
+        st.error(f"Error during auto-discovery: {e}")
+        return None
+
+def generate_health_report_table(_source_xml_content, _levels_xml_content, cylinder_index):
+    try:
+        source_root = ET.fromstring(_source_xml_content)
+        levels_root = ET.fromstring(_levels_xml_content)
+        col_idx = cylinder_index
+        
+        def convert_kpa_to_psi(kpa_str):
+            if kpa_str == "N/A" or not kpa_str: return "N/A"
+            try: return f"{float(kpa_str) * 0.145038:.1f}"
+            except (ValueError, TypeError): return kpa_str
+
+        suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE GAUGE', 2))
+        discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE GAUGE', 2))
+        suction_temp = find_xml_value(levels_root, 'Levels', 'SUCTION GAUGE TEMPERATURE', 2)
+        discharge_temp = find_xml_value(levels_root, 'Levels', 'COMP CYL, DISCHARGE TEMPERATURE', col_idx + 1)
+        bore = find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx + 1)
+        rod_diam = find_xml_value(source_root, 'Source', 'PISTON ROD DIAMETER', col_idx + 1)
+        comp_ratio_he = find_xml_value(source_root, 'Source', 'COMPRESSION RATIO', col_idx + 1, occurrence=2)
+        comp_ratio_ce = find_xml_value(source_root, 'Source', 'COMPRESSION RATIO', col_idx + 1, occurrence=1)
+        power_he = find_xml_value(source_root, 'Source', 'HORSEPOWER INDICATED,  LOAD', col_idx + 1, occurrence=2)
+        power_ce = find_xml_value(source_root, 'Source', 'HORSEPOWER INDICATED,  LOAD', col_idx + 1, occurrence=1)
+
+        data = {
+            'Cyl End': [f'{cylinder_index}H', f'{cylinder_index}C'], 'Bore (ins)': [bore] * 2, 'Rod Diam (ins)': ['N/A', rod_diam],
+            'Pressure Ps/Pd (psig)': [f"{suction_p} / {discharge_p}"] * 2, 'Temp Ts/Td (°C)': [f"{suction_temp} / {discharge_temp}"] * 2,
+            'Comp. Ratio': [comp_ratio_he, comp_ratio_ce], 'Indicated Power (ihp)': [power_he, power_ce]
+        }
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.warning(f"Could not generate health report: {e}")
+        return pd.DataFrame()
 
 @st.cache_data
 def load_all_curves_data(_curves_xml_content):
@@ -72,50 +176,8 @@ def load_all_curves_data(_curves_xml_content):
         df.sort_values('Crank Angle', inplace=True)
         return df, actual_columns
     except Exception as e:
-        st.error(f"Failed to load or parse curves data: {e}")
+        st.error(f"Failed to load curves data: {e}")
         return None, None
-
-@st.cache_data
-def auto_discover_configuration(_source_xml_content, all_curve_names):
-    try:
-        source_root = ET.fromstring(_source_xml_content)
-        num_cyl_str = find_xml_value(source_root, 'Source', "COMPRESSOR NUMBER OF CYLINDERS", 2)
-        machine_id = find_xml_value(source_root, 'Source', "Machine", 1)
-        if num_cyl_str == "N/A" or int(num_cyl_str) == 0: return None
-        num_cylinders = int(num_cyl_str)
-        cylinders_config = []
-        for i in range(1, num_cylinders + 1):
-            pressure_curve = next((c for c in all_curve_names if f".{i}H." in c and "STATIC" in c), None)
-            if not pressure_curve:
-                pressure_curve = next((c for c in all_curve_names if f".{i}C." in c and "STATIC" in c), None)
-            valve_curves = [
-                {"name": f"Cyl {i} HE Discharge", "curve": next((c for c in all_curve_names if f".{i}HD" in c and "VIBRATION" in c), None)},
-                {"name": f"Cyl {i} HE Suction", "curve": next((c for c in all_curve_names if f".{i}HS" in c and "VIBRATION" in c), None)},
-                {"name": f"Cyl {i} CE Discharge", "curve": next((c for c in all_curve_names if f".{i}CD" in c and "VIBRATION" in c), None)},
-                {"name": f"Cyl {i} CE Suction", "curve": next((c for c in all_curve_names if f".{i}CS" in c and "VIBRATION" in c), None)}
-            ]
-            if pressure_curve and any(vc['curve'] for vc in valve_curves):
-                cylinders_config.append({"cylinder_name": f"Cylinder {i}", "pressure_curve": pressure_curve, "valve_vibration_curves": [vc for vc in valve_curves if vc['curve']]})
-        return {"machine_id": machine_id, "cylinders": cylinders_config}
-    except Exception as e:
-        st.error(f"An error occurred during auto-discovery: {e}")
-        return None
-
-def find_xml_value(root, sheet_name, partial_key, col_offset):
-    try:
-        NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
-        ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-        if ws is None: return "N/A"
-        rows = ws.findall('.//ss:Row', NS)
-        for row in rows:
-            cells = row.findall('ss:Cell', NS)
-            if cells and cells[0].find('ss:Data', NS) is not None and partial_key.upper() in (cells[0].find('ss:Data', NS).text or "").upper():
-                if len(cells) > col_offset and cells[col_offset].find('ss:Data', NS) is not None:
-                    return cells[col_offset].find('ss:Data', NS).text
-        return "N/A"
-    except Exception:
-        return "N/A"
-
 
 def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, vertical_offset, analysis_ids):
     pressure_curve = cylinder_config.get('pressure_curve')
@@ -165,7 +227,8 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
     fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", secondary_y=True)
     return fig, report_data
 
-# --- Main Application UI and Logic ---
+
+# --- Main Application ---
 db_client = init_db()
 
 if 'active_session_id' not in st.session_state:
@@ -216,9 +279,9 @@ if uploaded_files and len(uploaded_files) == 3:
                     analysis_ids = {}
                     for item in temp_report_data:
                         rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
-                        existing_id = rs.rows[0][0] if rs.rows else None
-                        if existing_id:
-                            analysis_id = existing_id
+                        existing_id_row = rs.rows[0] if rs.rows else None
+                        if existing_id_row:
+                            analysis_id = existing_id_row[0]
                             db_client.execute("UPDATE analyses SET anomaly_count = ?, threshold = ? WHERE id = ?", (item['count'], item['threshold'], analysis_id))
                         else:
                             db_client.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
@@ -228,15 +291,53 @@ if uploaded_files and len(uploaded_files) == 3:
                     fig, report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
                     st.plotly_chart(fig, use_container_width=True)
 
+                    st.subheader("📋 Compressor Health Report")
+                    cylinder_index = int(re.search(r'\d+', selected_cylinder_name).group())
+                    health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
+                    if not health_report_df.empty:
+                        st.dataframe(health_report_df, use_container_width=True, hide_index=True)
+
                     with st.expander("Add labels and mark valve events"):
-                        # Your forms for labeling and adding valve events will go here
-                        # Remember to use `db_client.execute(...)` for all database operations
-                        pass
+                        st.subheader("Fault Labels")
+                        for item in report_data:
+                            if item['count'] > 0 and item['name'] != 'Pressure':
+                                analysis_id = analysis_ids[item['name']]
+                                with st.form(key=f"label_form_{analysis_id}"):
+                                    st.write(f"**{item['name']} Anomaly**")
+                                    selected_label = st.selectbox("Select fault label:", options=FAULT_LABELS, key=f"sel_{analysis_id}")
+                                    custom_label = st.text_input("Or enter custom label if 'Other':", key=f"txt_{analysis_id}")
+                                    submitted = st.form_submit_button("Save Label")
+                                    if submitted:
+                                        final_label = custom_label if selected_label == "Other" and custom_label else selected_label
+                                        if final_label != "Other":
+                                            db_client.execute("INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)", (analysis_id, final_label))
+                                            st.success(f"Label '{final_label}' saved for {item['name']}.")
+                        
+                        st.subheader("Mark Valve Open/Close Events")
+                        for item in report_data:
+                            if item['name'] != 'Pressure':
+                                analysis_id = analysis_ids[item['name']]
+                                with st.form(key=f"valve_form_{analysis_id}"):
+                                    st.write(f"**{item['name']} Valve Events:**")
+                                    cols = st.columns(2)
+                                    open_angle = cols[0].number_input("Open Angle", key=f"open_{analysis_id}", value=None, format="%.2f")
+                                    close_angle = cols[1].number_input("Close Angle", key=f"close_{analysis_id}", value=None, format="%.2f")
+                                    submitted = st.form_submit_button(f"Save Events for {item['name']}")
+                                    if submitted:
+                                        db_client.execute("DELETE FROM valve_events WHERE analysis_id = ?", (analysis_id,))
+                                        if open_angle is not None:
+                                            db_client.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'open', open_angle))
+                                        if close_angle is not None:
+                                            db_client.execute("INSERT INTO valve_events (analysis_id, event_type, crank_angle) VALUES (?, ?, ?)", (analysis_id, 'close', close_angle))
+                                        st.success(f"Events updated for {item['name']}.")
+                                        st.rerun()
+
+                    # The Export Report button can be added here if needed
             else:
                 st.error("Could not discover a valid machine configuration.")
         else:
             st.error("Failed to process curve data.")
     else:
-        st.warning("Please ensure 'curves' and 'source' XML files are uploaded.")
+        st.warning("Please ensure all required XML files are uploaded.")
 else:
     st.info("Please upload all three required XML files to begin.")
