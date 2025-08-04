@@ -725,14 +725,35 @@ if uploaded_files and len(uploaded_files) == 3:
                     selected_cylinder_config = next((c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), None)
 
                     if selected_cylinder_config:
+                        # ... inside the `if selected_cylinder_config:` block
+
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
                         analysis_ids = {}
                         cursor = db_conn.cursor()
                         for item in temp_report_data:
-                            cursor.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
-                                (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
-                            analysis_ids[item['name']] = cursor.lastrowid
+                            # Check if an analysis record already exists for this curve in this session/cylinder
+                            cursor.execute("""
+                                SELECT id FROM analyses 
+                                WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?
+                            """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
+                            
+                            existing_analysis = cursor.fetchone()
+
+                            if existing_analysis:
+                                # If it exists, reuse the ID and update the values
+                                analysis_id = existing_analysis[0]
+                                cursor.execute("UPDATE analyses SET anomaly_count = ?, threshold = ? WHERE id = ?",
+                                    (item['count'], item['threshold'], analysis_id))
+                            else:
+                                # If not, insert a new record and get its ID
+                                cursor.execute("""
+                                    INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) 
+                                    VALUES (?, ?, ?, ?, ?)
+                                """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
+                                analysis_id = cursor.lastrowid
+                            
+                            analysis_ids[item['name']] = analysis_id
                         db_conn.commit()
 
                         fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
@@ -872,3 +893,4 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
