@@ -349,6 +349,7 @@ def generate_html_report(machine_id, rpm, cylinder_name, report_data, health_rep
 def load_all_curves_data(_curves_xml_content):
     """
     Parses the entire Curves.xml file once and caches the resulting DataFrame.
+    Returns the DataFrame and the list of column names actually used, which prevents KeyErrors.
     """
     try:
         root = ET.fromstring(_curves_xml_content)
@@ -363,18 +364,31 @@ def load_all_curves_data(_curves_xml_content):
         rows = table.findall('ss:Row', NS)
         header_cells = rows[1].findall('ss:Cell', NS)
         raw_headers = [c.find('ss:Data', NS).text or '' for c in header_cells]
-        all_curve_names = ["Crank Angle"] + [re.sub(r'\s+', ' ', name.strip()) for name in raw_headers[1:]]
+        # This is the full list of headers found in the file
+        full_header_list = ["Crank Angle"] + [re.sub(r'\s+', ' ', name.strip()) for name in raw_headers[1:]]
 
         data = []
+        # Data starts from row 7 (index 6)
         for r in rows[6:]:
             cells = r.findall('ss:Cell', NS)
             row_data = [cell.find('ss:Data', NS).text for cell in cells]
             data.append(row_data)
         
-        df = pd.DataFrame(data, columns=all_curve_names[:len(data[0])])
+        if not data:
+            st.error("No data found in 'Curves' worksheet.")
+            return None, None
+            
+        # CRITICAL FIX: Determine the actual columns based on the length of the first data row.
+        # This prevents a mismatch if the number of headers is different from the number of data columns.
+        num_data_columns = len(data[0])
+        actual_columns = full_header_list[:num_data_columns]
+        
+        df = pd.DataFrame(data, columns=actual_columns)
         df = df.apply(pd.to_numeric, errors='coerce').dropna()
         df.sort_values('Crank Angle', inplace=True)
-        return df, all_curve_names
+
+        # Return the DataFrame and the list of columns that were ACTUALLY used
+        return df, actual_columns
     except Exception as e:
         st.error(f"Failed to load or parse curves data: {e}")
         return None, None
@@ -418,9 +432,11 @@ def extract_temperature(_levels_xml_content, cylinder_index):
         return "N/A"
 
 @st.cache_data
-def auto_discover_configuration(_source_xml_content, _curves_xml_content):
+def auto_discover_configuration(_source_xml_content, all_curve_names):
     """
-    Automatically discovers the machine configuration from the XML files.
+    Automatically discovers the machine configuration from the Source.xml file
+    and the provided list of available curve names. This prevents re-parsing
+    and ensures the discovered curves exist in the DataFrame.
     """
     try:
         source_root = ET.fromstring(_source_xml_content)
@@ -442,16 +458,12 @@ def auto_discover_configuration(_source_xml_content, _curves_xml_content):
             st.warning("Could not determine number of cylinders from Source.xml.")
             return None
 
-        curves_root = ET.fromstring(_curves_xml_content)
-        ws_curves = next((ws for ws in curves_root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Curves'), None)
-        table = ws_curves.find('.//ss:Table', NS)
-        rows = table.findall('ss:Row', NS)
-        header_cells = rows[1].findall('ss:Cell', NS)
-        raw_headers = [c.find('ss:Data', NS).text or '' for c in header_cells]
-        all_curve_names = [re.sub(r'\s+', ' ', name.strip()) for name in raw_headers[1:]]
-
+        # The list of available curves is now passed directly to the function.
+        # No need to re-parse Curves.xml.
+        
         cylinders_config = []
         for i in range(1, num_cylinders + 1):
+            # Search for curves within the provided list of actual columns
             pressure_curve = next((c for c in all_curve_names if f".{i}H." in c and "STATIC" in c), None)
             if not pressure_curve:
                 pressure_curve = next((c for c in all_curve_names if f".{i}C." in c and "STATIC" in c), None)
@@ -730,20 +742,29 @@ if uploaded_files and len(uploaded_files) == 3:
         st.sidebar.success("All files uploaded successfully!")
         
         try:
+            df = None
+            discovered_config = None
             # Show progress indicator
             with st.spinner("Analyzing machine data..."):
-                discovered_config = auto_discover_configuration(files_content['source'], files_content['curves'])
-                df, all_curve_names = load_all_curves_data(files_content['curves'])
+                # Step 1: Load data and get the *actual* columns used in the DataFrame.
+                df, actual_curve_names = load_all_curves_data(files_content['curves'])
+                
+                # Step 2: Pass the actual columns to the discovery function to ensure sync.
+                if df is not None and actual_curve_names is not None:
+                    discovered_config = auto_discover_configuration(files_content['source'], actual_curve_names)
+                else:
+                    # If df loading fails, discovered_config remains None
+                    discovered_config = None
             
-            rpm = extract_rpm(files_content['levels'])
-            machine_id = discovered_config.get('machine_id', 'N/A')
-            cursor = db_conn.cursor()
-            cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
-            db_conn.commit()
-            st.session_state.active_session_id = cursor.lastrowid
-            st.success(f"✅ New analysis session #{st.session_state.active_session_id} created.")
-
             if df is not None and discovered_config:
+                rpm = extract_rpm(files_content['levels'])
+                machine_id = discovered_config.get('machine_id', 'N/A')
+                cursor = db_conn.cursor()
+                cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
+                db_conn.commit()
+                st.session_state.active_session_id = cursor.lastrowid
+                st.success(f"✅ New analysis session #{st.session_state.active_session_id} created.")
+
                 cylinders = discovered_config.get("cylinders", [])
                 if not cylinders:
                     st.error("Could not automatically discover any valid cylinder configurations.")
@@ -951,6 +972,11 @@ if uploaded_files and len(uploaded_files) == 3:
                                         <div class="detail-item"><span>Flow Balance (HE):</span> <strong>{detail['flow_balance_he']}</strong></div>
                                     </div>
                                     """, unsafe_allow_html=True)
+            elif df is None:
+                # Error messages are already shown in the loading functions
+                pass
+            else:
+                st.error("Could not discover a valid machine configuration from the provided files.")
 
         except Exception as e:
             st.error(f"❌ An error occurred during processing. Please check the files. Details: {e}")
