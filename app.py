@@ -41,6 +41,8 @@ import json
 import sqlite3
 import datetime
 import time
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Optional PDF generation - handle missing reportlab gracefully
 try:
@@ -583,64 +585,70 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
         df[f'{curve_name}_anom'] = df[curve_name] > vib_thresh
         report_data.append({"name": vc['name'], "curve_name": curve_name, "threshold": vib_thresh, "count": df[f'{curve_name}_anom'].sum(), "unit": "G"})
 
-    fig, ax1 = plt.subplots(figsize=(16, 9))
-    plt.style.use('ggplot')
+    # --- Plotly Implementation ---
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    ax1.plot(df['Crank Angle'], df[pressure_curve], color='black', label='Pressure (PSI)', linewidth=2)
-    ax1.fill_between(df['Crank Angle'], df[pressure_curve].min(), df[pressure_curve].max(), where=df[f'{pressure_curve}_anom'], color='gray', alpha=0.4, interpolate=True, label='Pressure Anomaly')
-    ax1.set_ylabel('Pressure (PSI)', color='black', fontsize=14)
-    ax1.tick_params(axis='y', labelcolor='black')
-    ax1.set_xlabel('Crank Angle (deg)', fontsize=14)
+    # Add Pressure Trace
+    fig.add_trace(
+        go.Scatter(x=df['Crank Angle'], y=df[pressure_curve], name='Pressure (PSI)',
+                   line=dict(color='black', width=2), hovertemplate='Angle: %{x:.2f}°<br>Pressure: %{y:.2f} PSI'),
+        secondary_y=False,
+    )
+    # Add Pressure Anomaly Shading
+    anomaly_pressure = df[pressure_curve].where(df[f'{pressure_curve}_anom'])
+    fig.add_trace(
+        go.Scatter(x=df['Crank Angle'], y=anomaly_pressure, name='Pressure Anomaly',
+                   mode='lines', line=dict(width=0), showlegend=False,
+                   fillcolor='rgba(255, 0, 0, 0.3)', fill='tozeroy',
+                   hovertemplate='Anomaly: %{y:.2f} PSI'),
+        secondary_y=False,
+    )
 
-    ax2 = ax1.twinx()
+    # Add Vibration Traces and Valve Events
     colors = plt.cm.viridis(np.linspace(0, 1, len(valve_curves)))
     cursor = db_conn.cursor()
-    
     current_offset = 0
+
     for i, vc in enumerate(valve_curves):
         curve_name = vc['curve']
         label_name = vc['name']
-        vibration_data = df[curve_name] + current_offset
-        
-        # Plot the vibration signal envelope
+        color_rgba = f'rgba({colors[i][0]*255},{colors[i][1]*255},{colors[i][2]*255},0.4)'
+
+        # Add Vibration Envelope
         if envelope_view:
-            ax2.plot(df['Crank Angle'], vibration_data, color=colors[i], linewidth=0.5)
-            ax2.plot(df['Crank Angle'], -df[curve_name] + current_offset, color=colors[i], linewidth=0.5)
-            ax2.fill_between(df['Crank Angle'], vibration_data, -df[curve_name] + current_offset, color=colors[i], alpha=0.3, label=label_name, interpolate=True)
+            upper_bound = df[curve_name] + current_offset
+            lower_bound = -df[curve_name] + current_offset
+            fig.add_trace(go.Scatter(x=df['Crank Angle'], y=upper_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), showlegend=False, hoverinfo='none'), secondary_y=True)
+            fig.add_trace(go.Scatter(x=df['Crank Angle'], y=lower_bound, mode='lines', line=dict(width=0.5, color=color_rgba.replace('0.4','1')), fill='tonexty', fillcolor=color_rgba, name=label_name, hoverinfo='none'), secondary_y=True)
         else:
-            ax2.plot(df['Crank Angle'], vibration_data, label=label_name, color=colors[i], linewidth=1.5)
-            ax2.fill_between(df['Crank Angle'], vibration_data.min(), vibration_data.max(), where=df[f'{curve_name}_anom'], color=colors[i], alpha=0.3, interpolate=True)
-        
-        # Check for and plot valve events for this specific valve
+            vibration_data = df[curve_name] + current_offset
+            fig.add_trace(go.Scatter(x=df['Crank Angle'], y=vibration_data, name=label_name, line=dict(color=color_rgba.replace('0.4','1'))), secondary_y=True)
+
+        # Get and plot valve events
         analysis_id = analysis_ids.get(vc['name'])
         if analysis_id:
-            events = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
-            # Define a y-position for the text marker just above the current signal's envelope
-            max_vibration_for_curve = df[curve_name].max()
-            text_y_position = max_vibration_for_curve + current_offset + 0.2 
-            
-            for event_type, crank_angle in events:
-                # Draw vertical line across the whole plot
-                line_color = 'g' if event_type == 'open' else 'r'
-                ax1.axvline(x=crank_angle, color=line_color, linestyle='--', linewidth=1.5)
-                # Place text marker on the vibration axis (ax2) at the correct vertical offset
-                ax2.text(crank_angle, text_y_position, 
-                         'O' if event_type == 'open' else 'C', 
-                         color=line_color, 
-                         fontsize=14, weight='bold', ha='center', va='bottom',
-                         bbox=dict(boxstyle="circle,pad=0.2", fc="white", ec=line_color, lw=2))
+            events_raw = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
+            events = {etype: angle for etype, angle in events_raw}
 
+            # Add Duration Shading
+            if 'open' in events and 'close' in events:
+                fig.add_vrect(x0=events['open'], x1=events['close'], fillcolor=color_rgba, layer="below", line_width=0, annotation_text=f"{label_name} Open", annotation_position="top left")
+
+            # Add Markers
+            for event_type, crank_angle in events.items():
+                fig.add_vline(x=crank_angle, line_width=2, line_dash="dash", line_color='green' if event_type == 'open' else 'red')
+        
         current_offset += vertical_offset
-
-    ax2.set_ylabel('Vibration (G) with Offset', color='blue', fontsize=14)
-    ax2.tick_params(axis='y', labelcolor='blue')
-    ax2.grid(False)
-
-    fig.suptitle(f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}", fontsize=20, weight='bold')
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Update layout
+    fig.update_layout(
+        title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}",
+        xaxis_title="Crank Angle (deg)",
+        template="ggplot2",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    fig.update_yaxes(title_text="<b>Pressure (PSI)</b>", secondary_y=False)
+    fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", secondary_y=True)
     
     return fig, report_data
 
@@ -778,7 +786,7 @@ if uploaded_files and len(uploaded_files) == 3:
                         fig, report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids)
                         
                         st.header(f"📊 Diagnostic Chart for {selected_cylinder_name}")
-                        st.pyplot(fig)
+                        st.plotly_chart(fig, use_container_width=True)
                         
                         st.subheader("📋 Compressor Health Report")
                         cylinder_index = int(re.search(r'\d+', selected_cylinder_name).group())
@@ -932,4 +940,5 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
 
