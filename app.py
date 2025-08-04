@@ -807,7 +807,6 @@ except Exception as e:
     st.error(f"❌ Error retrieving labels: {str(e)}")
 
 # --- Footer ---
-st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 0.8em;'>
     🔧 AI-Powered Machine Diagnostics Analyzer | 
@@ -817,4 +816,4 @@ st.markdown("""
 """.format(
     st.session_state.active_session_id or "None", 
     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-), unsafe_allow_html=Tr
+), unsafe_allow_html=True)
