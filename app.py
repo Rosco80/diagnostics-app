@@ -412,8 +412,14 @@ with st.sidebar:
     st.header("3. View All Saved Labels")
     st.caption("Shows all labels saved from all past analysis sessions.")
     cursor = db_conn.cursor()
-    machine_ids = [row[0] for row in cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()]
-    selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
+    machine_ids = [row[0] for row in cursor.execute(
+    "SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC"
+).fetchall()]
+selected_machine_id_filter = st.selectbox(
+    "Filter labels by Machine ID",
+    options=["All"] + machine_ids
+)
+
 
 # --- Main Application Logic ---
 if uploaded_files and len(uploaded_files) == 3:
@@ -534,3 +540,4 @@ if all_labels:
         file_name="all_anomaly_labels.json",
         mime="application/json"
     )
+
