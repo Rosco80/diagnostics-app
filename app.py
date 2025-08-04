@@ -1,3 +1,4 @@
+"""
 AI-Powered Machine Diagnostics Analyzer
 ========================================
 
