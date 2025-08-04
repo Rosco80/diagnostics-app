@@ -43,7 +43,7 @@ import datetime
 import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import libsql_client.dbapi as dbapi
+import libsql.dbapi as dbapi
 
 # Optional PDF generation - handle missing reportlab gracefully
 try:
@@ -952,6 +952,7 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
+
 
 
 
