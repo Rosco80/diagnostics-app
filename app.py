@@ -24,6 +24,7 @@ pandas
 numpy
 matplotlib
 reportlab
+libsql-client
 
 Usage:
 ------
@@ -43,7 +44,15 @@ import datetime
 import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import libsql.dbapi as dbapi
+
+# Correct import for libSQL
+try:
+    import libsql_client
+    LIBSQL_AVAILABLE = True
+except ImportError:
+    # Fallback to regular sqlite3 for development/testing
+    LIBSQL_AVAILABLE = False
+    st.warning("⚠️ libsql-client not installed. Using SQLite fallback for development.")
 
 # Optional PDF generation - handle missing reportlab gracefully
 try:
@@ -72,62 +81,121 @@ FAULT_LABELS = [
 # --- Database Setup ---
 
 def init_db():
-    """Initializes the database connection using Turso."""
-    try:
-        url = st.secrets["TURSO_DATABASE_URL"]
-        auth_token = st.secrets["TURSO_AUTH_TOKEN"]
-    except KeyError:
-        st.error("Database secrets (TURSO_DATABASE_URL, TURSO_AUTH_TOKEN) not found. Please configure secrets for Turso.")
-        st.stop()
-
-    conn = dbapi.connect(
-        database=url,
-        auth_token=auth_token
-    )
-    
-    c = conn.cursor()
-    # Session table to track each analysis run
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            machine_id TEXT,
-            rpm TEXT
-        )
-    ''')
-    # Analysis table to store results for each cylinder in a session
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER,
-            cylinder_name TEXT,
-            curve_name TEXT,
-            anomaly_count INTEGER,
-            threshold REAL,
-            FOREIGN KEY (session_id) REFERENCES sessions (id)
-        )
-    ''')
-    # Labels table for supervised learning data
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            analysis_id INTEGER,
-            label_text TEXT,
-            FOREIGN KEY (analysis_id) REFERENCES analyses (id)
-        )
-    ''')
-    # New table for valve open/close events
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS valve_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            analysis_id INTEGER,
-            event_type TEXT, -- "open" or "close"
-            crank_angle REAL,
-            FOREIGN KEY (analysis_id) REFERENCES analyses (id)
-        )
-    ''')
-    conn.commit()
-    return conn
+    """Initializes the database connection using Turso or SQLite fallback."""
+    if LIBSQL_AVAILABLE:
+        # Try to connect to Turso
+        try:
+            url = st.secrets["TURSO_DATABASE_URL"]
+            auth_token = st.secrets["TURSO_AUTH_TOKEN"]
+            
+            # Create libSQL client
+            conn = libsql_client.create_client(
+                url=url,
+                auth_token=auth_token
+            )
+            
+            # Create tables using libSQL client
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    machine_id TEXT,
+                    rpm TEXT
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    cylinder_name TEXT,
+                    curve_name TEXT,
+                    anomaly_count INTEGER,
+                    threshold REAL,
+                    FOREIGN KEY (session_id) REFERENCES sessions (id)
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    analysis_id INTEGER,
+                    label_text TEXT,
+                    FOREIGN KEY (analysis_id) REFERENCES analyses (id)
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS valve_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    analysis_id INTEGER,
+                    event_type TEXT, -- "open" or "close"
+                    crank_angle REAL,
+                    FOREIGN KEY (analysis_id) REFERENCES analyses (id)
+                )
+            ''')
+            
+            conn.commit()
+            return conn
+            
+        except KeyError:
+            st.error("Database secrets (TURSO_DATABASE_URL, TURSO_AUTH_TOKEN) not found. Please configure secrets for Turso.")
+            st.stop()
+        except Exception as e:
+            st.error(f"Failed to connect to Turso database: {str(e)}")
+            st.stop()
+    else:
+        # Fallback to SQLite for development
+        st.info("Using SQLite fallback database for development.")
+        conn = sqlite3.connect('diagnostics.db', check_same_thread=False)
+        c = conn.cursor()
+        
+        # Session table to track each analysis run
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                machine_id TEXT,
+                rpm TEXT
+            )
+        ''')
+        
+        # Analysis table to store results for each cylinder in a session
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                cylinder_name TEXT,
+                curve_name TEXT,
+                anomaly_count INTEGER,
+                threshold REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions (id)
+            )
+        ''')
+        
+        # Labels table for supervised learning data
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS labels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analysis_id INTEGER,
+                label_text TEXT,
+                FOREIGN KEY (analysis_id) REFERENCES analyses (id)
+            )
+        ''')
+        
+        # New table for valve open/close events
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS valve_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analysis_id INTEGER,
+                event_type TEXT, -- "open" or "close"
+                crank_angle REAL,
+                FOREIGN KEY (analysis_id) REFERENCES analyses (id)
+            )
+        ''')
+        
+        conn.commit()
+        return conn
 
 # --- Session State Initialization ---
 db_conn = init_db()
@@ -143,16 +211,27 @@ if 'form_submitted' not in st.session_state:
 def safe_db_operation(operation, *args):
     """Safely execute database operations with error handling"""
     try:
-        cursor = db_conn.cursor()
-        result = cursor.execute(operation, args)
-        db_conn.commit()
-        return result
-    except sqlite3.Error as e:
+        if LIBSQL_AVAILABLE:
+            # For libSQL client
+            result = db_conn.execute(operation, args)
+            db_conn.commit()
+            return result
+        else:
+            # For SQLite
+            cursor = db_conn.cursor()
+            result = cursor.execute(operation, args)
+            db_conn.commit()
+            return result
+    except Exception as e:
         st.error(f"Database error: {str(e)}")
         return None
-    except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
-        return None
+
+def get_db_cursor():
+    """Get appropriate cursor/client for database operations"""
+    if LIBSQL_AVAILABLE:
+        return db_conn  # libSQL client acts as both connection and cursor
+    else:
+        return db_conn.cursor()  # SQLite cursor
 
 def validate_angle(angle, valve_name):
     """Validate crank angle input"""
@@ -618,7 +697,7 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
 
     # Add Vibration Traces and Valve Events
     colors = plt.cm.viridis(np.linspace(0, 1, len(valve_curves)))
-    cursor = db_conn.cursor()
+    cursor = get_db_cursor()
     current_offset = 0
 
     for i, vc in enumerate(valve_curves):
@@ -639,7 +718,10 @@ def generate_cylinder_view(df, cylinder_config, envelope_view, vertical_offset, 
         # Get and plot valve events
         analysis_id = analysis_ids.get(vc['name'])
         if analysis_id:
-            events_raw = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
+            if LIBSQL_AVAILABLE:
+                events_raw = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
+            else:
+                events_raw = cursor.execute("SELECT event_type, crank_angle FROM valve_events WHERE analysis_id = ?", (analysis_id,)).fetchall()
             events = {etype: angle for etype, angle in events_raw}
 
             # Add Duration Shading
@@ -716,8 +798,11 @@ with st.sidebar:
     
     st.header("3. View All Saved Labels")
     st.caption("Shows all labels saved from all past analysis sessions.")
-    cursor = db_conn.cursor()
-    machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
+    cursor = get_db_cursor()
+    if LIBSQL_AVAILABLE:
+        machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
+    else:
+        machine_ids = cursor.execute("SELECT DISTINCT machine_id FROM sessions ORDER BY machine_id ASC").fetchall()
     machine_id_options = [row[0] for row in machine_ids]
     selected_machine_id_filter = st.selectbox("Filter labels by Machine ID", options=["All"] + machine_id_options)
 
@@ -750,10 +835,17 @@ if uploaded_files and len(uploaded_files) == 3:
                 machine_id = discovered_config.get('machine_id', 'N/A')
                 
                 if st.session_state.active_session_id is None:
-                    cursor = db_conn.cursor()
-                    cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
-                    db_conn.commit()
-                    st.session_state.active_session_id = cursor.lastrowid
+                    cursor = get_db_cursor()
+                    if LIBSQL_AVAILABLE:
+                        cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
+                        db_conn.commit()
+                        # Get last insert rowid for libSQL
+                        result = cursor.execute("SELECT last_insert_rowid()").fetchone()
+                        st.session_state.active_session_id = result[0]
+                    else:
+                        cursor.execute("INSERT INTO sessions (machine_id, rpm) VALUES (?, ?)", (machine_id, rpm))
+                        db_conn.commit()
+                        st.session_state.active_session_id = cursor.lastrowid
                     st.success(f"✅ New analysis session #{st.session_state.active_session_id} created.")
 
                 cylinders = discovered_config.get("cylinders", [])
@@ -769,15 +861,19 @@ if uploaded_files and len(uploaded_files) == 3:
                         _, temp_report_data = generate_cylinder_view(df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {})
                         
                         analysis_ids = {}
-                        cursor = db_conn.cursor()
+                        cursor = get_db_cursor()
                         for item in temp_report_data:
                             # Check if an analysis record already exists for this curve in this session/cylinder
-                            cursor.execute("""
-                                SELECT id FROM analyses 
-                                WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?
-                            """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
-                            
-                            existing_analysis = cursor.fetchone()
+                            if LIBSQL_AVAILABLE:
+                                existing_analysis = cursor.execute("""
+                                    SELECT id FROM analyses 
+                                    WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?
+                                """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'])).fetchone()
+                            else:
+                                existing_analysis = cursor.execute("""
+                                    SELECT id FROM analyses 
+                                    WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?
+                                """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'])).fetchone()
 
                             if existing_analysis:
                                 # If it exists, reuse the ID and update the values
@@ -790,7 +886,12 @@ if uploaded_files and len(uploaded_files) == 3:
                                     INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) 
                                     VALUES (?, ?, ?, ?, ?)
                                 """, (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
-                                analysis_id = cursor.lastrowid
+                                
+                                if LIBSQL_AVAILABLE:
+                                    result = cursor.execute("SELECT last_insert_rowid()").fetchone()
+                                    analysis_id = result[0]
+                                else:
+                                    analysis_id = cursor.lastrowid
                             
                             analysis_ids[item['name']] = analysis_id
                         db_conn.commit()
@@ -912,7 +1013,7 @@ st.header("📋 All Saved Labels")
 st.markdown("Historical data from all analysis sessions.")
 
 try:
-    cursor = db_conn.cursor()
+    cursor = get_db_cursor()
     query = """
     SELECT s.timestamp, s.machine_id, a.cylinder_name, a.curve_name, l.label_text 
     FROM labels l 
@@ -925,7 +1026,10 @@ try:
         params.append(selected_machine_id_filter)
     query += " ORDER BY s.timestamp DESC"
 
-    all_labels = cursor.execute(query, params).fetchall()
+    if LIBSQL_AVAILABLE:
+        all_labels = cursor.execute(query, params).fetchall()
+    else:
+        all_labels = cursor.execute(query, params).fetchall()
 
     if all_labels:
         labels_df = pd.DataFrame(all_labels, columns=['Timestamp', 'Machine ID', 'Cylinder', 'Curve', 'Label'])
@@ -952,7 +1056,3 @@ st.markdown(f"""
     Last Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 </div>
 """, unsafe_allow_html=True)
-
-
-
-
