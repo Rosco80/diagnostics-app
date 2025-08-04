@@ -837,7 +837,8 @@ st.markdown("""
     Session ID: {} | 
     Last Updated: {}
 </div>
-""".format(
+""").format(
     st.session_state.active_session_id or "None", 
     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 ), unsafe_allow_html=Tr
+
