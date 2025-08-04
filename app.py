@@ -364,10 +364,12 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
         st.error(f"An error occurred during auto-discovery: {e}")
         return None
 
-def find_xml_value(root, sheet_name, partial_key, col_offset):
+def find_xml_value(root, sheet_name, partial_key, col_offset, cylinder_id_pattern=None):
     """
-    Robustly finds a value in a worksheet by row label (partial match) and column index.
-    This version correctly handles sparse rows with `ss:Index` attributes.
+    Robustly finds a value in a worksheet.
+    - If cylinder_id_pattern is None, it uses partial_key and col_offset.
+    - If cylinder_id_pattern is provided, it finds the row with partial_key and then
+      searches that row for a cell containing the cylinder_id_pattern.
     """
     try:
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
@@ -389,21 +391,39 @@ def find_xml_value(root, sheet_name, partial_key, col_offset):
             if partial_key.upper() not in cell_text:
                 continue
 
-            dense_cells = {}
-            current_idx = 0
-            for cell in all_cells_in_row:
-                ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
-                if ss_index_str:
-                    current_idx = int(ss_index_str) - 1
-                
-                dense_cells[current_idx] = cell
-                current_idx += 1
+            # --- LOGIC FOR DIFFERENT DATA STRUCTURES ---
+            
+            # Case 1: Data is identified by a cylinder-specific pattern within the row
+            if cylinder_id_pattern:
+                for cell in all_cells_in_row:
+                    data_node = cell.find('ss:Data', NS)
+                    if data_node is not None and data_node.text:
+                        if cylinder_id_pattern in data_node.text:
+                            # The next cell usually contains the value
+                            try:
+                                value_cell_index = all_cells_in_row.index(cell) + 1
+                                value_node = all_cells_in_row[value_cell_index].find('ss:Data', NS)
+                                return value_node.text if value_node is not None else "N/A"
+                            except (IndexError, AttributeError):
+                                return "N/A" # No next cell
+                return "N/A" # Pattern not found in any cell of the matched row
 
-            if col_offset in dense_cells:
-                value_node = dense_cells[col_offset].find('ss:Data', NS)
-                return value_node.text if value_node is not None and value_node.text else "N/A"
+            # Case 2: Data is in a fixed column offset (handles ss:Index)
             else:
-                return "N/A"
+                dense_cells = {}
+                current_idx = 0
+                for cell in all_cells_in_row:
+                    ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
+                    if ss_index_str:
+                        current_idx = int(ss_index_str) - 1
+                    dense_cells[current_idx] = cell
+                    current_idx += 1
+
+                if col_offset in dense_cells:
+                    value_node = dense_cells[col_offset].find('ss:Data', NS)
+                    return value_node.text if value_node is not None and value_node.text else "N/A"
+                else:
+                    return "N/A"
 
         return "N/A"
     except Exception:
@@ -417,6 +437,8 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         levels_root = ET.fromstring(_levels_xml_content)
         
         col_idx = cylinder_index + 1
+        cyl_pattern_main = f"C.{cylinder_index}."
+        cyl_pattern_alt = f"C{cylinder_index}."
 
         def convert_kpa_to_psi(kpa_str):
             if kpa_str == "N/A" or not kpa_str: return "N/A"
@@ -434,7 +456,7 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
             'Rod Diam (ins)': ['N/A', find_xml_value(source_root, 'Source', 'PISTON ROD DIAMETER', col_idx)],
             'Pressure Ps/Pd (psig)': [f"{suction_p} / {discharge_p}"] * 2,
             'Temp Ts/Td (°C)': [
-                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', col_idx)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', col_idx)}"
+                f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_main)} / {find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_alt)}",
             ] * 2,
             'Comp. Ratio': [find_xml_value(levels_root, 'Levels', 'COMPRESSION RATIO', col_idx)] * 2,
             'Indicated Power (ihp)': [
@@ -466,6 +488,8 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
 
         for i in range(1, num_cylinders + 1):
             col_idx = i + 1
+            cyl_pattern_main = f"C.{i}." # Pattern for Suction Temp
+            cyl_pattern_alt = f"C{i}." # Pattern for Discharge Temp
             
             suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE', col_idx))
             discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE', col_idx))
@@ -473,8 +497,8 @@ def get_all_cylinder_details(_source_xml_content, _levels_xml_content, num_cylin
             detail = {
                 "name": f"Cylinder {i}",
                 "bore": f"{find_xml_value(source_root, 'Source', 'COMPRESSOR CYLINDER BORE', col_idx)} in",
-                "suction_temp": f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', col_idx)} °C",
-                "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', col_idx)} °C",
+                "suction_temp": f"{find_xml_value(levels_root, 'Levels', 'SUCTION TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_main)} °C",
+                "discharge_temp": f"{find_xml_value(levels_root, 'Levels', 'DISCHARGE TEMPERATURE', 0, cylinder_id_pattern=cyl_pattern_alt)} °C",
                 "suction_pressure": f"{suction_p} psig",
                 "discharge_pressure": f"{discharge_p} psig",
                 "flow_balance_ce": f"{find_xml_value(levels_root, 'Levels', 'CRANK END FLOW BALANCE', col_idx)} %",
@@ -817,3 +841,5 @@ st.markdown("""
     st.session_state.active_session_id or "None", 
     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 ), unsafe_allow_html=True)
+"""" and I want to make some changes to it.
+Can you remove the selection and make the chang
