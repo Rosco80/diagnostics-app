@@ -1776,28 +1776,32 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 context_rs = _db_client.execute("SELECT session_id, cylinder_name FROM analyses WHERE id = ?", (first_analysis_id,))
                 if context_rs.rows:
                     session_id, cylinder_name = context_rs.rows[0]
-                    
+
                     # Query valve events for this curve
                     events_raw = _db_client.execute(
                         "SELECT curve_type, crank_angle FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
                         (session_id, cylinder_name, vc['name'])
                     ).rows
-                    events = {etype: angle for etype, angle in events_raw}
-                    if 'open' in events and 'close' in events:
-                        fig.add_vrect(
-                            x0=events['open'],
-                            x1=events['close'],
-                            fillcolor=color_rgba.replace('0.4','0.2'),
-                            layer="below",
-                            line_width=0
-                        )
-                    for event_type, crank_angle in events.items():
-                        fig.add_vline(
-                            x=crank_angle,
-                            line_width=2,
-                            line_dash="dash",
-                            line_color='green' if event_type == 'open' else 'red'
-                        )
+
+                    # Only process events if we have data
+                    if events_raw:
+                        events = {etype: angle for etype, angle in events_raw}
+                        if 'open' in events and 'close' in events:
+                            fig.add_vrect(
+                                x0=events['open'],
+                                x1=events['close'],
+                                fillcolor=color_rgba.replace('0.4','0.2'),
+                                layer="below",
+                                line_width=0
+                            )
+                        for event_type, crank_angle in events.items():
+                            fig.add_vline(
+                                x=crank_angle,
+                                line_width=2,
+                                line_dash="dash",
+                                line_color='green' if event_type == 'open' else 'red'
+                            )
+                    # No warning needed when no valve events exist - this is normal
             except Exception as e:
                 st.warning(f"Could not load valve events for {vc['name']}: {e}")
         
