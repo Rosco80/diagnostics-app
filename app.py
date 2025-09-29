@@ -9,14 +9,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import io
-import json
-import sqlite3
 import datetime
 import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import libsql_client
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import MinMaxScaler
 import plotly.express as px
 import math
 
@@ -59,7 +58,7 @@ TAG_FAULT_TYPES = [
     "Other fault"
 ]
 try:
-    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib import colors
@@ -284,7 +283,7 @@ def validate_xml_files(uploaded_files):
                     machine_info = None
                     try:
                         machine_info = find_xml_value(root, 'Levels', 'Machine', 2)
-                    except:
+                    except Exception:
                         pass
                     
                     if not machine_info or machine_info == 'N/A':
@@ -311,7 +310,7 @@ def validate_xml_files(uploaded_files):
                         for elem in root.iter():
                             if hasattr(elem, 'text') and elem.text and 'CYLINDER' in str(elem.text):
                                 config_count += 1
-                    except:
+                    except Exception:
                         config_count = 0
                     
                     validation_results['file_info'][file_type] = {
@@ -326,13 +325,13 @@ def validate_xml_files(uploaded_files):
                         'status': 'Valid'
                     }
                 
-        except ET.ParseError as e:
+        except ET.ParseError:
             validation_results['errors'].append(f"{file_type.title()} file: Invalid XML format")
             validation_results['file_info'][file_type] = {'status': 'Invalid XML', 'error': 'XML parsing failed'}
         except UnicodeDecodeError:
             validation_results['errors'].append(f"{file_type.title()} file: Invalid file encoding")
             validation_results['file_info'][file_type] = {'status': 'Encoding Error', 'error': 'Cannot decode file'}
-        except Exception as e:
+        except Exception:
             validation_results['errors'].append(f"{file_type.title()} file: Unexpected error")
             validation_results['file_info'][file_type] = {'status': 'Error', 'error': 'Processing failed'}
     
@@ -362,7 +361,7 @@ def extract_preview_info(files_content):
                 if hasattr(elem, 'text') and elem.text and '/' in str(elem.text) and len(str(elem.text)) > 8:
                     preview_info['date_time'] = str(elem.text)
                     break
-        except:
+        except Exception:
             pass
         preview_info['file_sizes']['levels'] = len(files_content['levels']) / 1024
 
@@ -382,7 +381,7 @@ def extract_preview_info(files_content):
                     break
             preview_info['total_curves'] = curve_count
 
-        except:
+        except Exception:
             pass
         preview_info['file_sizes']['curves'] = len(files_content['curves']) / 1024
 
@@ -417,7 +416,7 @@ def extract_preview_info(files_content):
                             preview_info['cylinder_count'] = len(config['cylinders'])
                             if preview_info['machine_id'] == 'Unknown' and config.get('machine_id'):
                                 preview_info['machine_id'] = config['machine_id']
-            except:
+            except Exception:
                 # Fallback: simple bore count
                 bore_count = 0
                 for elem in source_root.iter():
@@ -425,7 +424,7 @@ def extract_preview_info(files_content):
                         bore_count += 1
                 preview_info['cylinder_count'] = min(bore_count, 10)
 
-        except:
+        except Exception:
             pass
         preview_info['file_sizes']['source'] = len(files_content['source']) / 1024
 
@@ -739,26 +738,43 @@ def display_historical_analysis(db_client):
 
 def run_anomaly_detection(df, curve_names, contamination_level=0.05): 
     """
-    Applies Isolation Forest to detect anomalies and calculate their scores.
+    Applies Isolation Forest to detect anomalies, calculate severity scores,
+    and normalize them into 0–1 confidence values.
     """
     for curve in curve_names:
         if curve in df.columns:
             data = df[[curve]].values
-            # Use the contamination_level parameter
             model = IsolationForest(contamination=contamination_level, random_state=42)
             
-            # Fit the model and get binary predictions (-1 for anomalies)
+            # Fit the model
             predictions = model.fit_predict(data)
             df[f'{curve}_anom'] = predictions == -1
 
-            # Get the raw anomaly scores. Lower scores are more anomalous.
-            anomaly_scores = model.score_samples(data)
-            
-            # We invert the scores so that higher values indicate a more severe anomaly.
-            # This is more intuitive for visualization and reporting.
-            df[f'{curve}_anom_score'] = -1 * anomaly_scores
+            # Raw anomaly scores (lower = more anomalous)
+            raw_scores = model.score_samples(data)
+
+            # Flip so higher = more anomalous
+            severity_scores = -1 * raw_scores
+            df[f'{curve}_anom_score'] = severity_scores
+
+            # Normalize scores into 0–1 confidence range
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            confidences = scaler.fit_transform(severity_scores.reshape(-1, 1))
+            df[f'{curve}_anom_confidence'] = confidences.flatten()
+
+            # Optional: map into levels
+            def classify_confidence(c):
+                if c >= 0.8:
+                    return "CRITICAL"
+                elif c >= 0.6:
+                    return "HIGH"
+                elif c >= 0.4:
+                    return "MEDIUM"
+                else: return "LOW"
+            df[f'{curve}_anom_level'] = [classify_confidence(c) for c in confidences.flatten()]
             
     return df
+
 
 def run_rule_based_diagnostics(report_data):
     """
@@ -797,14 +813,17 @@ def find_xml_value(root, sheet_name, partial_key, col_offset, occurrence=1):
     try:
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == sheet_name), None)
-        if ws is None: return "N/A"
+        if ws is None:
+            return "N/A"
         rows = ws.findall('.//ss:Row', NS)
         match_count = 0
         for row in rows:
             all_cells_in_row = row.findall('ss:Cell', NS)
-            if not all_cells_in_row: continue
+            if not all_cells_in_row:
+                continue
             first_cell_data_node = all_cells_in_row[0].find('ss:Data', NS)
-            if first_cell_data_node is None or first_cell_data_node.text is None: continue
+            if first_cell_data_node is None or first_cell_data_node.text is None:
+                continue
             if partial_key.upper() in (first_cell_data_node.text or "").strip().upper():
                 match_count += 1
                 if match_count == occurrence:
@@ -813,7 +832,8 @@ def find_xml_value(root, sheet_name, partial_key, col_offset, occurrence=1):
                     current_idx = 1
                     for cell in all_cells_in_row:
                         ss_index_str = cell.get(f'{{{NS["ss"]}}}Index')
-                        if ss_index_str: current_idx = int(ss_index_str)
+                        if ss_index_str:
+                            current_idx = int(ss_index_str)
                         dense_cells[current_idx] = cell
                         current_idx += 1
                     if target_idx in dense_cells:
@@ -830,14 +850,16 @@ def load_all_curves_data(_curves_xml_content):
         root = ET.fromstring(_curves_xml_content)
         NS = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         ws = next((ws for ws in root.findall('.//ss:Worksheet', NS) if ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name') == 'Curves'), None)
-        if ws is None: return None, None
+        if ws is None:
+            return None, None
         table = ws.find('.//ss:Table', NS)
         rows = table.findall('ss:Row', NS)
         header_cells = rows[1].findall('ss:Cell', NS)
         raw_headers = [c.find('ss:Data', NS).text or '' for c in header_cells]
         full_header_list = ["Crank Angle"] + [re.sub(r'\s+', ' ', name.strip()) for name in raw_headers[1:]]
         data = [[cell.find('ss:Data', NS).text for cell in r.findall('ss:Cell', NS)] for r in rows[6:]]
-        if not data: return None, None
+        if not data:
+            return None, None
         num_data_columns = len(data[0])
         actual_columns = full_header_list[:num_data_columns]
         df = pd.DataFrame(data, columns=actual_columns).apply(pd.to_numeric, errors='coerce').dropna()
@@ -888,7 +910,7 @@ def extract_rpm_from_source(source_xml_content):
                     if rpm_data is not None:
                         try:
                             return f"{float(rpm_data.text):.0f}"
-                        except:
+                        except (ValueError, TypeError):
                             return "N/A"
     except Exception as e:
         print("RPM extraction failed:", e)
@@ -967,13 +989,13 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
             
             # Try Head End first (.{i}H.)
             he_pressure = next(
-                (c for c in all_curve_names if f".{i}H." in c and "STATIC" in c and "COMPRESSOR PT" in c),
+                (c for c in all_curve_names if f".{i}H." in c and ("STATIC" in c or "SPECIAL" in c) and "COMPRESSOR PT" in c),
                 None
             )
             
             # Try Crank End (.{i}C.)
             ce_pressure = next(
-                (c for c in all_curve_names if f".{i}C." in c and "STATIC" in c and "COMPRESSOR PT" in c),
+                (c for c in all_curve_names if f".{i}C." in c and ("STATIC" in c or "SPECIAL" in c) and "COMPRESSOR PT" in c),
                 None
             )
             
@@ -986,15 +1008,15 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
             
             # Head End Discharge (.{i}HD1)
             he_discharge = next(
-                (c for c in all_curve_names if f".{i}HD1" in c and "VIBRATION" in c),
+                (c for c in all_curve_names if f".{i}HD1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
                 None
             )
             if he_discharge:
                 valve_curves.append({"name": "HE Discharge", "curve": he_discharge})
             
-            # Head End Suction (.{i}HS1)  
+            # Head End Suction (.{i}HS1)
             he_suction = next(
-                (c for c in all_curve_names if f".{i}HS1" in c and "VIBRATION" in c),
+                (c for c in all_curve_names if f".{i}HS1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
                 None
             )
             if he_suction:
@@ -1002,7 +1024,7 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
             
             # Crank End Discharge (.{i}CD1)
             ce_discharge = next(
-                (c for c in all_curve_names if f".{i}CD1" in c and "VIBRATION" in c),
+                (c for c in all_curve_names if f".{i}CD1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
                 None
             )
             if ce_discharge:
@@ -1010,7 +1032,7 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
             
             # Crank End Suction (.{i}CS1)
             ce_suction = next(
-                (c for c in all_curve_names if f".{i}CS1" in c and "VIBRATION" in c),
+                (c for c in all_curve_names if f".{i}CS1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
                 None
             )
             if ce_suction:
@@ -1045,6 +1067,9 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
 
         # FIXED: Ensure cylinders are sorted by number to guarantee Cylinder 1 comes first
         cylinders_config.sort(key=lambda x: int(x['cylinder_name'].split()[-1]))
+
+        if len(cylinders_config) == 0:
+            return None
 
         return {
             "machine_id": machine_id,
@@ -1098,12 +1123,14 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         col_idx = cylinder_index
         
         def convert_kpa_to_psi(kpa_str):
-            if kpa_str == "N/A" or not kpa_str: return "N/A"
+            if kpa_str == "N/A" or not kpa_str:
+                return "N/A"
             try: return f"{float(kpa_str) * 0.145038:.1f}"
             except (ValueError, TypeError): return kpa_str
 
         def format_numeric_value(value_str, precision=2):
-            if value_str == "N/A" or not value_str: return "N/A"
+            if value_str == "N/A" or not value_str:
+                return "N/A"
             try: return f"{float(value_str):.{precision}f}"
             except (ValueError, TypeError): return value_str
 
@@ -1457,7 +1484,6 @@ def generate_pdf_report(machine_id, rpm, cylinder_name, report_data, health_repo
         anomaly_data = [['Component', 'Anomaly Count', 'Avg. Threshold', 'Unit', 'Status']]
         for item in report_data:
             status = "⚠️ High" if item.get('count', 0) > 5 else "✓ Normal"
-            status_color_cell = colors.red if item.get('count', 0) > 5 else colors.green
             anomaly_data.append([
                 item.get('name', 'Unknown'),
                 str(item.get('count', 0)),
@@ -1746,7 +1772,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 secondary_y=True
             )
 
-        # Add anomalies
+        # Add anomalies with confidence coloring
         anomalies_df = df[df[f'{curve_name}_anom']]
         if not anomalies_df.empty:
             anomaly_vibration_data = anomalies_df[curve_name] + current_offset
@@ -1757,16 +1783,24 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     mode='markers',
                     name=f"{label_name} Anomalies",
                     marker=dict(
-                        color=anomalies_df[f'{curve_name}_anom_score'],
+                        color=anomalies_df[f'{curve_name}_anom_confidence'],  # use confidence
                         colorscale='Reds',
-                        showscale=False
+                        showscale=True,  # display color bar
+                        colorbar=dict(title="Anomaly Confidence", x=1.05)  # side legend
                     ),
                     hoverinfo='text',
-                    text=[f'Score: {score:.2f}' for score in anomalies_df[f'{curve_name}_anom_score']],
+                    text=[
+                        f"Confidence: {conf:.2f} | Level: {lvl}"
+                        for conf, lvl in zip(
+                            anomalies_df[f'{curve_name}_anom_confidence'],
+                            anomalies_df[f'{curve_name}_anom_level']
+                        )
+                    ],
                     showlegend=False
                 ),
                 secondary_y=True
             )
+            
 
         # Add valve events
         if analysis_ids:
@@ -2086,7 +2120,7 @@ def check_and_display_alerts(db_client, machine_id, cylinder_name, critical_aler
                 "INSERT INTO alerts (machine_id, cylinder, severity, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 (machine_id, cylinder_name, 'CRITICAL', alert_msg, current_time)
             )
-        except:
+        except Exception:
             pass
         st.error(f"🚨 CRITICAL ALERT: {alert_msg}")
     
@@ -2097,7 +2131,7 @@ def check_and_display_alerts(db_client, machine_id, cylinder_name, critical_aler
                 "INSERT INTO alerts (machine_id, cylinder, severity, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 (machine_id, cylinder_name, 'WARNING', alert_msg, current_time)
             )
-        except:
+        except Exception:
             pass
         st.warning(f"⚠️ WARNING: {alert_msg}")
     
@@ -2108,7 +2142,7 @@ def check_and_display_alerts(db_client, machine_id, cylinder_name, critical_aler
                 "INSERT INTO alerts (machine_id, cylinder, severity, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 (machine_id, cylinder_name, 'HIGH', alert, current_time)
             )
-        except:
+        except Exception:
             pass
         st.error(f"🔥 {alert}")
 
@@ -2118,9 +2152,12 @@ def generate_pdf_report_enhanced(machine_id, rpm, cylinder_name, report_data, he
         st.warning("ReportLab not installed. PDF generation unavailable.")
         return None
     
-    if suggestions is None: suggestions = {}
-    if health_score is None: health_score = 50.0
-    if critical_alerts is None: critical_alerts = []
+    if suggestions is None:
+        suggestions = {}
+    if health_score is None:
+        health_score = 50.0
+    if critical_alerts is None:
+        critical_alerts = []
     
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
@@ -2302,7 +2339,7 @@ def validate_pressure_signals(df, cylinder_config, pressure_options):
     # FIXED: Check CE PT trace using actual time-series data from df (CURVES.xml)
     if pressure_options.get('show_ce_pt', False):
         # Look for CE pressure columns in the actual DataFrame
-        ce_columns = [col for col in df.columns if '.1C.' in col and 'STATIC' in col and 'COMPRESSOR PT' in col]
+        ce_columns = [col for col in df.columns if '.1C.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
         
         if ce_columns and len(ce_columns) > 0:
             ce_pressure_data = df[ce_columns[0]]  # Use the actual time-series data
@@ -2322,7 +2359,7 @@ def validate_pressure_signals(df, cylinder_config, pressure_options):
     # FIXED: Check HE PT trace using actual time-series data from df (CURVES.xml)
     if pressure_options.get('show_he_pt', False):
         # Look for HE pressure columns in the actual DataFrame
-        he_columns = [col for col in df.columns if '.1H.' in col and 'STATIC' in col and 'COMPRESSOR PT' in col]
+        he_columns = [col for col in df.columns if '.1H.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
         
         if he_columns and len(he_columns) > 0:
             he_pressure_data = df[he_columns[0]]  # Use the actual time-series data
@@ -2384,7 +2421,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
     # FIXED: Show CE (Crank End) pressure trace - ADD to existing plot, don't replace
     if pressure_options['show_ce_pt']:
         # Look for CE pressure columns directly in DataFrame
-        ce_columns = [col for col in df.columns if '.1C.' in col and 'STATIC' in col and 'COMPRESSOR PT' in col]
+        ce_columns = [col for col in df.columns if '.1C.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
         
         if ce_columns:
             ce_pressure_col = ce_columns[0]
@@ -2420,7 +2457,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
     # FIXED: Show HE (Head End) pressure trace - ADD to existing plot, don't replace
     if pressure_options['show_he_pt']:
         # Look for HE pressure columns directly in DataFrame  
-        he_columns = [col for col in df.columns if '.1H.' in col and 'STATIC' in col and 'COMPRESSOR PT' in col]
+        he_columns = [col for col in df.columns if '.1H.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
         
         if he_columns:
             he_pressure_col = he_columns[0]
