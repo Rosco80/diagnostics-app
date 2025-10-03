@@ -599,7 +599,7 @@ def enhanced_file_upload_section():
             for file_type, info in validation_results['file_info'].items():
                 st.markdown(f"**{file_type.title()} File Analysis:**")
                 if info['status'] == 'Valid':
-                    st.write(f"• Status: ✅ Valid XML structure")
+                    st.write("• Status: ✅ Valid XML structure")
                     st.write(f"• File size: {info['size_kb']:.1f} KB")
                     if file_type == 'curves':
                         st.write(f"• Data elements: {info['data_points']}")
@@ -770,7 +770,8 @@ def run_anomaly_detection(df, curve_names, contamination_level=0.05):
                     return "HIGH"
                 elif c >= 0.4:
                     return "MEDIUM"
-                else: return "LOW"
+                else:
+                    return "LOW"
             df[f'{curve}_anom_level'] = [classify_confidence(c) for c in confidences.flatten()]
             
     return df
@@ -862,8 +863,12 @@ def load_all_curves_data(_curves_xml_content):
             return None, None
         num_data_columns = len(data[0])
         actual_columns = full_header_list[:num_data_columns]
-        df = pd.DataFrame(data, columns=actual_columns).apply(pd.to_numeric, errors='coerce').dropna()
+        # FIXED: Use dropna(how='all') to only drop rows where ALL values are NaN
+        # Also drop completely empty columns to clean up data
+        df = pd.DataFrame(data, columns=actual_columns).apply(pd.to_numeric, errors='coerce').dropna(how='all').dropna(axis=1, how='all')
         df.sort_values('Crank Angle', inplace=True)
+        # Update actual_columns to match the remaining columns after cleanup
+        actual_columns = df.columns.tolist()
         return df, actual_columns
     except Exception as e:
         st.error(f"Failed to load curves data: {e}")
@@ -1003,40 +1008,105 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
             pressure_curve = he_pressure or ce_pressure
             
 
-            # FIXED: Correct valve curve detection based on actual XML patterns
+            # FIXED: Detect ALL valves (not just valve #1)
             valve_curves = []
-            
-            # Head End Discharge (.{i}HD1)
-            he_discharge = next(
-                (c for c in all_curve_names if f".{i}HD1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
-                None
-            )
-            if he_discharge:
-                valve_curves.append({"name": "HE Discharge", "curve": he_discharge})
-            
-            # Head End Suction (.{i}HS1)
-            he_suction = next(
-                (c for c in all_curve_names if f".{i}HS1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
-                None
-            )
-            if he_suction:
-                valve_curves.append({"name": "HE Suction", "curve": he_suction})
-            
-            # Crank End Discharge (.{i}CD1)
-            ce_discharge = next(
-                (c for c in all_curve_names if f".{i}CD1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
-                None
-            )
-            if ce_discharge:
-                valve_curves.append({"name": "CE Discharge", "curve": ce_discharge})
-            
-            # Crank End Suction (.{i}CS1)
-            ce_suction = next(
-                (c for c in all_curve_names if f".{i}CS1" in c and ("VIBRATION" in c or "ULTRASONIC" in c)),
-                None
-            )
-            if ce_suction:
-                valve_curves.append({"name": "CE Suction", "curve": ce_suction})
+
+            # Head End Discharge (.{i}HD1, .{i}HD2, .{i}HD3, ...)
+            he_discharge_valves = [
+                c for c in all_curve_names
+                if f".{i}HD" in c and ("VIBRATION" in c or "ULTRASONIC" in c)
+            ]
+            for valve_curve in he_discharge_valves:
+                # Extract valve number (e.g., HD1 -> 1, HD2 -> 2)
+                valve_num = ""
+                for char in valve_curve.split(f".{i}HD")[1]:
+                    if char.isdigit():
+                        valve_num += char
+                    else:
+                        break
+
+                # FIXED: Add sensor type suffix to differentiate VIBRATION vs ULTRASONIC
+                if "ULTRASONIC" in valve_curve.upper():
+                    sensor_type = " (US)"
+                elif "VIBRATION" in valve_curve.upper():
+                    sensor_type = " (VIB)"
+                else:
+                    sensor_type = ""
+
+                valve_name = f"HE Discharge {valve_num}{sensor_type}" if valve_num else f"HE Discharge{sensor_type}"
+                valve_curves.append({"name": valve_name, "curve": valve_curve})
+
+            # Head End Suction (.{i}HS1, .{i}HS2, .{i}HS3, ...)
+            he_suction_valves = [
+                c for c in all_curve_names
+                if f".{i}HS" in c and ("VIBRATION" in c or "ULTRASONIC" in c)
+            ]
+            for valve_curve in he_suction_valves:
+                valve_num = ""
+                for char in valve_curve.split(f".{i}HS")[1]:
+                    if char.isdigit():
+                        valve_num += char
+                    else:
+                        break
+
+                # FIXED: Add sensor type suffix to differentiate VIBRATION vs ULTRASONIC
+                if "ULTRASONIC" in valve_curve.upper():
+                    sensor_type = " (US)"
+                elif "VIBRATION" in valve_curve.upper():
+                    sensor_type = " (VIB)"
+                else:
+                    sensor_type = ""
+
+                valve_name = f"HE Suction {valve_num}{sensor_type}" if valve_num else f"HE Suction{sensor_type}"
+                valve_curves.append({"name": valve_name, "curve": valve_curve})
+
+            # Crank End Discharge (.{i}CD1, .{i}CD2, .{i}CD3, ...)
+            ce_discharge_valves = [
+                c for c in all_curve_names
+                if f".{i}CD" in c and ("VIBRATION" in c or "ULTRASONIC" in c)
+            ]
+            for valve_curve in ce_discharge_valves:
+                valve_num = ""
+                for char in valve_curve.split(f".{i}CD")[1]:
+                    if char.isdigit():
+                        valve_num += char
+                    else:
+                        break
+
+                # FIXED: Add sensor type suffix to differentiate VIBRATION vs ULTRASONIC
+                if "ULTRASONIC" in valve_curve.upper():
+                    sensor_type = " (US)"
+                elif "VIBRATION" in valve_curve.upper():
+                    sensor_type = " (VIB)"
+                else:
+                    sensor_type = ""
+
+                valve_name = f"CE Discharge {valve_num}{sensor_type}" if valve_num else f"CE Discharge{sensor_type}"
+                valve_curves.append({"name": valve_name, "curve": valve_curve})
+
+            # Crank End Suction (.{i}CS1, .{i}CS2, .{i}CS3, ...)
+            ce_suction_valves = [
+                c for c in all_curve_names
+                if f".{i}CS" in c and ("VIBRATION" in c or "ULTRASONIC" in c)
+            ]
+            for valve_curve in ce_suction_valves:
+                valve_num = ""
+                for char in valve_curve.split(f".{i}CS")[1]:
+                    if char.isdigit():
+                        valve_num += char
+                    else:
+                        break
+
+                # FIXED: Add sensor type suffix to differentiate VIBRATION vs ULTRASONIC
+                if "ULTRASONIC" in valve_curve.upper():
+                    sensor_type = " (US)"
+                elif "VIBRATION" in valve_curve.upper():
+                    sensor_type = " (VIB)"
+                else:
+                    sensor_type = ""
+
+                valve_name = f"CE Suction {valve_num}{sensor_type}" if valve_num else f"CE Suction{sensor_type}"
+                valve_curves.append({"name": valve_name, "curve": valve_curve})
 
 
             # FIXED: More lenient condition - include cylinder if it has EITHER pressure OR valve data
@@ -1125,14 +1195,18 @@ def generate_health_report_table(_source_xml_content, _levels_xml_content, cylin
         def convert_kpa_to_psi(kpa_str):
             if kpa_str == "N/A" or not kpa_str:
                 return "N/A"
-            try: return f"{float(kpa_str) * 0.145038:.1f}"
-            except (ValueError, TypeError): return kpa_str
+            try:
+                return f"{float(kpa_str) * 0.145038:.1f}"
+            except (ValueError, TypeError):
+                return kpa_str
 
         def format_numeric_value(value_str, precision=2):
             if value_str == "N/A" or not value_str:
                 return "N/A"
-            try: return f"{float(value_str):.{precision}f}"
-            except (ValueError, TypeError): return value_str
+            try:
+                return f"{float(value_str):.{precision}f}"
+            except (ValueError, TypeError):
+                return value_str
 
         suction_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'SUCTION PRESSURE GAUGE', 2))
         discharge_p = convert_kpa_to_psi(find_xml_value(levels_root, 'Levels', 'DISCHARGE PRESSURE GAUGE', 2))
@@ -1864,6 +1938,16 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
     fig.update_yaxes(title_text="<b>Pressure (PSI)</b>", color="black", secondary_y=False)
     fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
+    # FIXED: Dynamic Y-axis range for valves based on offset and valve count
+    if len(valve_curves) > 0:
+        # Calculate total offset range needed
+        total_offset_range = len(valve_curves) * vertical_offset
+        # Add 20% padding above and below
+        y_max = total_offset_range * 1.2
+        y_min = -total_offset_range * 0.2
+        # Apply the calculated range to the secondary Y-axis (valves)
+        fig.update_yaxes(range=[y_min, y_max], secondary_y=True)
+
     # --- ADD P-V OVERLAY if requested ---
     if show_pv_overlay and view_mode == "Crank-angle" and can_plot_pv:
         try:
@@ -1904,16 +1988,32 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                             volume_values = V.values
                             pressure_values = pressure_data.values
                             crank_angles = df['Crank Angle'].values
-                            
-                            # Find positions of min and max volume
-                            min_vol_pos = np.argmin(volume_values)
-                            max_vol_pos = np.argmax(volume_values)
-                            
-                            # Get crank angles and pressures for overlay markers
-                            tdc_crank_angle = crank_angles[min_vol_pos]  # X=Crank Angle
-                            bdc_crank_angle = crank_angles[max_vol_pos]  # X=Crank Angle
-                            tdc_pressure = pressure_values[min_vol_pos]  # Y=Pressure
-                            bdc_pressure = pressure_values[max_vol_pos]  # Y=Pressure
+
+                            # FIXED: Use PRESSURE-based detection instead of volume-based
+                            # Smooth pressure to avoid noise in peak detection
+                            window_size = min(20, len(pressure_values) // 10)
+                            if window_size > 3:
+                                # Create smoothed pressure using pandas rolling mean
+                                pressure_series = pd.Series(pressure_values)
+                                smoothed_pressure = pressure_series.rolling(window=window_size, center=True, min_periods=1).mean().values
+                            else:
+                                smoothed_pressure = pressure_values
+
+                            # TDC: Find where pressure is maximum (peak compression)
+                            tdc_pos = np.argmax(smoothed_pressure)
+
+                            # BDC: Find pressure minimum in first 60% of cycle (before peak compression)
+                            search_end = int(len(pressure_values) * 0.6)
+                            if search_end > 0:
+                                bdc_pos = np.argmin(smoothed_pressure[:search_end])
+                            else:
+                                bdc_pos = 0
+
+                            # Get crank angles and pressures for markers
+                            tdc_crank_angle = crank_angles[tdc_pos]  # X=Crank Angle
+                            bdc_crank_angle = crank_angles[bdc_pos]  # X=Crank Angle
+                            tdc_pressure = pressure_values[tdc_pos]  # Y=Pressure (use original, not smoothed)
+                            bdc_pressure = pressure_values[bdc_pos]  # Y=Pressure (use original, not smoothed)
                             
                             # Add TDC marker on crank-angle chart
                             fig.add_trace(
@@ -1964,14 +2064,14 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                             fig.update_layout(
                                 annotations=fig.layout.annotations + (dict(
                                     x=0.02, y=0.98, xref="paper", yref="paper",
-                                    text=f"<b>P-V Overlay Active</b><br>Volume range: {V.min():.1f} - {V.max():.1f} in³<br>Clearance: {clearance_pct}%",
+                                    text=f"<b>P-V Overlay Active</b><br>Volume range: {V.min():.1f} - {V.max():.1f} in³<br>Clearance: {clearance_pct}%<br>TDC at {tdc_crank_angle:.1f}° | BDC at {bdc_crank_angle:.1f}°",
                                     showarrow=False, bgcolor="rgba(128,0,128,0.1)",
                                     bordercolor="purple", borderwidth=1,
                                     font=dict(size=9), align="left"
                                 ),)
                             )
-                            
-                            st.info("✅ P-V overlay active! Purple dotted line shows scaled volume, markers show TDC/BDC positions.")
+
+                            st.info(f"✅ P-V overlay active! TDC detected at {tdc_crank_angle:.1f}° (peak pressure), BDC at {bdc_crank_angle:.1f}° (min pressure).")
                         else:
                             st.warning("⚠️ Data length mismatch between volume, pressure, and DataFrame")
                         
@@ -2670,9 +2770,25 @@ with st.sidebar:
     
     vertical_offset = st.slider(
         "Vertical Offset",
-        0.0, 5.0, 1.0, 0.1,
-        key='vertical_offset'
+        0.0, 50.0, 10.0, 1.0,
+        key='vertical_offset',
+        help="Spacing between valve curves. Increase for better separation when multiple valves are detected."
     )
+
+    # Show recommended offset based on number of valves
+    if st.session_state.analysis_results and st.session_state.get('selected_cylinder_name'):
+        discovered_config = st.session_state.analysis_results.get('discovered_config')
+        if discovered_config:
+            cylinders = discovered_config.get("cylinders", [])
+            selected_cyl_name = st.session_state.get('selected_cylinder_name', 'Cylinder 1')
+            selected_cyl = next((c for c in cylinders if c.get("cylinder_name") == selected_cyl_name), None)
+            if selected_cyl:
+                num_valves = len(selected_cyl.get('valve_vibration_curves', []))
+                if num_valves > 0:
+                    recommended_offset = max(10, num_valves * 3)
+                    if vertical_offset < recommended_offset * 0.7:
+                        st.info(f"💡 Tip: With {num_valves} valves detected, try offset ~{recommended_offset} for better separation")
+
     view_mode = st.radio(
         "View Mode",
         ["Crank-angle", "P-V"],
@@ -2904,7 +3020,8 @@ if validated_files:
             cylinder_names = [c.get("cylinder_name") for c in cylinders]
             
             # Rest of your existing code stays the same...
-            with st.sidebar: selected_cylinder_name, selected_cylinder_config = render_cylinder_selection_sidebar(discovered_config)
+            with st.sidebar:
+                selected_cylinder_name, selected_cylinder_config = render_cylinder_selection_sidebar(discovered_config)
 
                                 
             if selected_cylinder_config:
@@ -3078,27 +3195,29 @@ if validated_files:
                     st.subheader("Fault Labels")
                     for item in report_data:
                         if item['count'] > 0 and item['name'] != 'Pressure':
-                            with st.form(key=f"label_form_{analysis_ids[item['name']]}"):
+                            # FIXED: Use curve_name for unique keys instead of name
+                            curve_key = item['curve_name'].replace(' ', '_').replace('.', '_').replace('-', '_')
+                            with st.form(key=f"label_form_{curve_key}"):
                                 st.write(f"**{item['name']} Anomaly**")
-                                
+
                                 default_label = suggestions.get(item['name'], "Normal")
                                 if default_label in FAULT_LABELS:
                                     selected_label = st.selectbox(
                                         "Select fault label:",
                                         options=FAULT_LABELS,
                                         index=FAULT_LABELS.index(default_label),
-                                        key=f"sel_{analysis_ids[item['name']]}"
+                                        key=f"sel_{curve_key}"
                                     )
                                 else:
                                     selected_label = st.selectbox(
                                         "Select fault label:",
                                         options=FAULT_LABELS,
-                                        key=f"sel_{analysis_ids[item['name']]}"
+                                        key=f"sel_{curve_key}"
                                     )
 
                                 custom_label = st.text_input(
                                     "Or enter custom label if 'Other':",
-                                    key=f"txt_{analysis_ids[item['name']]}"
+                                    key=f"txt_{curve_key}"
                                 )
                                 if st.form_submit_button("Save Label"):
                                     final_label = custom_label if selected_label == "Other" and custom_label else selected_label
@@ -3112,17 +3231,19 @@ if validated_files:
                     st.subheader("Mark Valve Open/Close Events")
                     for item in report_data:
                         if item['name'] != 'Pressure':
-                            with st.form(key=f"valve_form_{analysis_ids[item['name']]}"):
+                            # FIXED: Use curve_name for unique keys instead of name
+                            curve_key = item['curve_name'].replace(' ', '_').replace('.', '_').replace('-', '_')
+                            with st.form(key=f"valve_form_{curve_key}"):
                                 st.write(f"**{item['name']} Valve Events:**")
                                 cols = st.columns(2)
-                                open_angle = cols[0].number_input("Open Angle", key=f"open_{analysis_ids[item['name']]}", value=None, format="%.2f")
-                                close_angle = cols[1].number_input("Close Angle", key=f"close_{analysis_ids[item['name']]}", value=None, format="%.2f")
+                                open_angle = cols[0].number_input("Open Angle", key=f"open_{curve_key}", value=None, format="%.2f")
+                                close_angle = cols[1].number_input("Close Angle", key=f"close_{curve_key}", value=None, format="%.2f")
                                 if st.form_submit_button(f"Save Events for {item['name']}"):
                                     # Clear existing valve events for this curve
                                     db_client.execute("DELETE FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
-                                    if open_angle is not None: 
+                                    if open_angle is not None:
                                         db_client.execute("INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], open_angle, 0.0, 'open'))
-                                    if close_angle is not None: 
+                                    if close_angle is not None:
                                         db_client.execute("INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], close_angle, 0.0, 'close'))
                                     st.success(f"Events updated for {item['name']}.")
                                     st.rerun()
