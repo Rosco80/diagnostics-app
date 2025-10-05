@@ -487,6 +487,7 @@ def enhanced_file_upload_section():
                         del st.session_state.validated_files
                     if 'analysis_results' in st.session_state:
                         st.session_state.analysis_results = None
+                    st.cache_data.clear()  # Clear Streamlit cache to load fresh data
                     st.rerun()
         
         return files_content
@@ -507,6 +508,7 @@ def enhanced_file_upload_section():
             del st.session_state.validated_files
         if 'analysis_results' in st.session_state:
             st.session_state.analysis_results = None
+        st.cache_data.clear()  # Clear Streamlit cache to load fresh data
         st.rerun()
 
     if uploaded_files:
@@ -625,6 +627,11 @@ def enhanced_file_upload_section():
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
             if st.button("🚀 Analyse", type="primary", use_container_width=True):
+                # FIXED: Clear old analysis results when new files are uploaded
+                st.session_state.analysis_results = None
+                st.session_state.active_session_id = None
+                if 'auto_discover_config' in st.session_state:
+                    del st.session_state['auto_discover_config']
                 st.session_state.validated_files = files_content
                 st.markdown('</div>', unsafe_allow_html=True)
                 return files_content
@@ -1003,10 +1010,11 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
                 (c for c in all_curve_names if f".{i}C." in c and ("STATIC" in c or "SPECIAL" in c) and "COMPRESSOR PT" in c),
                 None
             )
-            
-            # Prefer Head End, fall back to Crank End
+
+            # Store both HE and CE pressure curves (for dual trace support)
+            # Keep legacy pressure_curve for backward compatibility (prefer HE, fall back to CE)
             pressure_curve = he_pressure or ce_pressure
-            
+
 
             # FIXED: Detect ALL valves (not just valve #1)
             valve_curves = []
@@ -1124,7 +1132,9 @@ def auto_discover_configuration(_source_xml_content, all_curve_names):
 
                 cylinder_config = {
                     "cylinder_name": f"Cylinder {i}",
-                    "pressure_curve": pressure_curve,
+                    "pressure_curve": pressure_curve,  # Legacy field (for backward compatibility)
+                    "he_pressure_curve": he_pressure,  # Head End pressure curve
+                    "ce_pressure_curve": ce_pressure,  # Crank End pressure curve
                     "valve_vibration_curves": valve_curves,
                     "bore": bore,
                     "rod_diameter": rod_dia,
@@ -1618,7 +1628,7 @@ def generate_pdf_report(machine_id, rpm, cylinder_name, report_data, health_repo
         st.error(f"PDF generation failed: {str(e)}")
         return None
 
-def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, vertical_offset, analysis_ids, contamination_level, view_mode="Crank-angle", clearance_pct=5.0, show_pv_overlay=False):
+def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, vertical_offset, analysis_ids, contamination_level, view_mode="Crank-angle", clearance_pct=5.0, show_pv_overlay=False, amplitude_scale=1.0, dark_theme=False, pressure_options=None):
     """
     Generates cylinder view plots with pressure and valve vibration data.
     """
@@ -1660,7 +1670,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                             marker=dict(size=2),
                             name="P-V Cycle",
                             hovertemplate="<b>Volume:</b> %{x:.1f} in³<br>" +
-                                        "<b>Pressure:</b> %{y:.1f} PSI<br>" +
+                                        "<b>Pressure:</b> %{y:.1f} PSIG<br>" +
                                         "<extra></extra>"
                         ))
                         
@@ -1670,10 +1680,20 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                 # Use numpy arrays for safer operations
                                 volume_values = V.values
                                 pressure_values = pressure_data.values
-                                
-                                # Find positions of min and max volume
-                                min_vol_pos = np.argmin(volume_values)
-                                max_vol_pos = np.argmax(volume_values)
+
+                                # Find positions of min and max volume (filter NaN from BOTH volume and pressure)
+                                vol_valid_mask = ~np.isnan(volume_values)
+                                pressure_valid_mask = ~np.isnan(pressure_values)
+                                combined_valid_mask = vol_valid_mask & pressure_valid_mask
+
+                                if combined_valid_mask.sum() > 0:
+                                    valid_indices = np.where(combined_valid_mask)[0]
+                                    valid_volumes = volume_values[combined_valid_mask]
+                                    min_vol_pos = valid_indices[np.argmin(valid_volumes)]
+                                    max_vol_pos = valid_indices[np.argmax(valid_volumes)]
+                                else:
+                                    min_vol_pos = 0
+                                    max_vol_pos = len(volume_values) - 1 if len(volume_values) > 0 else 0
                                 
                                 # Get the actual values for P-V plot (Volume on X-axis)
                                 min_vol = volume_values[min_vol_pos]
@@ -1708,22 +1728,39 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                 )
                                 
                                 # Debug info for P-V diagram
-                                st.info(f"🔍 TDC at {min_vol:.1f} in³ ({min_pressure:.1f} PSI), BDC at {max_vol:.1f} in³ ({max_pressure:.1f} PSI)")
+                                st.info(f"🔍 TDC at {min_vol:.1f} in³ ({min_pressure:.1f} PSIG), BDC at {max_vol:.1f} in³ ({max_pressure:.1f} PSIG)")
                             else:
                                 st.warning("⚠️ Volume and pressure data length mismatch or empty data")
                     
                         except Exception as e:
                             st.warning(f"⚠️ Could not mark TDC/BDC points: {str(e)}")
                 
-                        fig.update_layout(
-                            height=700,
-                            title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')}",
-                            template="plotly_white",
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                            showlegend=True
-                        )
-                        fig.update_xaxes(title_text="<b>Volume (in³)</b>")
-                        fig.update_yaxes(title_text="<b>Pressure (PSI)</b>")
+                        # Apply dark theme or default theme for P-V diagram
+                        if dark_theme:
+                            fig.update_layout(
+                                height=700,
+                                title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')}",
+                                template="plotly_dark",
+                                plot_bgcolor='black',
+                                paper_bgcolor='black',
+                                font=dict(color='white'),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='white')),
+                                showlegend=True,
+                                xaxis=dict(gridcolor='#444444', zerolinecolor='#666666'),
+                                yaxis=dict(gridcolor='#444444', zerolinecolor='#666666')
+                            )
+                            fig.update_xaxes(title_text="<b>Volume (in³)</b>", color='white')
+                            fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color='white')
+                        else:
+                            fig.update_layout(
+                                height=700,
+                                title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')}",
+                                template="plotly_white",
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                showlegend=True
+                            )
+                            fig.update_xaxes(title_text="<b>Volume (in³)</b>")
+                            fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>")
                 
                         # Add pressure data to report_data
                         if pressure_curve in df.columns:
@@ -1734,7 +1771,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                 "curve_name": pressure_curve,
                                 "threshold": avg_score,
                                 "count": anomaly_count,
-                                "unit": "PSI"
+                                "unit": "PSIG"
                             })
                 
                         return fig, report_data
@@ -1758,17 +1795,35 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         # Return empty figure and report data if P-V plot fails
         if 'fig' not in locals():
             fig = go.Figure()
-            fig.update_layout(
-                height=700,
-                title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')} (Error)",
-                template="plotly_white"
-            )
-            fig.add_annotation(
-                text="Unable to generate P-V diagram",
-                xref="paper", yref="paper",
-                x=0.5, y=0.5,
-                showarrow=False
-            )
+            # Apply dark theme or default theme for error P-V diagram
+            if dark_theme:
+                fig.update_layout(
+                    height=700,
+                    title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')} (Error)",
+                    template="plotly_dark",
+                    plot_bgcolor='black',
+                    paper_bgcolor='black',
+                    font=dict(color='white')
+                )
+                fig.add_annotation(
+                    text="Unable to generate P-V diagram",
+                    xref="paper", yref="paper",
+                    x=0.5, y=0.5,
+                    showarrow=False,
+                    font=dict(color='white', size=16)
+                )
+            else:
+                fig.update_layout(
+                    height=700,
+                    title_text=f"P-V Diagram — {cylinder_config.get('cylinder_name','Cylinder')} (Error)",
+                    template="plotly_white"
+                )
+                fig.add_annotation(
+                    text="Unable to generate P-V diagram",
+                    xref="paper", yref="paper",
+                    x=0.5, y=0.5,
+                    showarrow=False
+                )
         return fig, report_data
 
     # --- Crank-angle mode OR Dual view mode ---
@@ -1783,14 +1838,16 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
             "curve_name": pressure_curve,
             "threshold": avg_score,
             "count": anomaly_count,
-            "unit": "PSI"
+            "unit": "PSIG"
         })
+        # Set pressure line color based on theme
+        pressure_color = 'white' if dark_theme else 'black'
         fig.add_trace(
             go.Scatter(
                 x=df['Crank Angle'],
                 y=df[pressure_curve],
-                name='Pressure (PSI)',
-                line=dict(color='black', width=2)
+                name='Pressure (PSIG)',
+                line=dict(color=pressure_color, width=2)
             ),
             secondary_y=False
         )
@@ -1807,8 +1864,8 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         color_rgba = f'rgba({colors[i][0]*255},{colors[i][1]*255},{colors[i][2]*255},0.4)'
 
         if envelope_view:
-            upper_bound = df[curve_name] + current_offset
-            lower_bound = -df[curve_name] + current_offset
+            upper_bound = (df[curve_name] * amplitude_scale) + current_offset
+            lower_bound = (-df[curve_name] * amplitude_scale) + current_offset
             fig.add_trace(
                 go.Scatter(
                     x=df['Crank Angle'],
@@ -1834,7 +1891,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 secondary_y=True
             )
         else:
-            vibration_data = df[curve_name] + current_offset
+            vibration_data = (df[curve_name] * amplitude_scale) + current_offset
             fig.add_trace(
                 go.Scatter(
                     x=df['Crank Angle'],
@@ -1849,7 +1906,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         # Add anomalies with confidence coloring
         anomalies_df = df[df[f'{curve_name}_anom']]
         if not anomalies_df.empty:
-            anomaly_vibration_data = anomalies_df[curve_name] + current_offset
+            anomaly_vibration_data = (anomalies_df[curve_name] * amplitude_scale) + current_offset
             fig.add_trace(
                 go.Scatter(
                     x=anomalies_df['Crank Angle'],
@@ -1928,15 +1985,33 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
 
     # Set up layout
     title_suffix = " with P-V Overlay" if show_pv_overlay else ""
-    fig.update_layout(
-        height=700,
-        title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}{title_suffix}",
-        xaxis_title="Crank Angle (deg)",
-        template="ggplot2",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    fig.update_yaxes(title_text="<b>Pressure (PSI)</b>", color="black", secondary_y=False)
-    fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
+    # Apply dark theme or default theme
+    if dark_theme:
+        fig.update_layout(
+            height=700,
+            title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}{title_suffix}",
+            xaxis_title="Crank Angle (deg)",
+            template="plotly_dark",
+            plot_bgcolor='black',
+            paper_bgcolor='black',
+            font=dict(color='white'),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='white')),
+            xaxis=dict(gridcolor='#444444', zerolinecolor='#666666'),
+            yaxis=dict(gridcolor='#444444', zerolinecolor='#666666'),
+            yaxis2=dict(gridcolor='#444444', zerolinecolor='#666666')
+        )
+        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="white", secondary_y=False)
+        fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="cyan", secondary_y=True)
+    else:
+        fig.update_layout(
+            height=700,
+            title_text=f"Diagnostics for {cylinder_config.get('cylinder_name', 'Cylinder')}{title_suffix}",
+            xaxis_title="Crank Angle (deg)",
+            template="ggplot2",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black", secondary_y=False)
+        fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
     # FIXED: Dynamic Y-axis range for valves based on offset and valve count
     if len(valve_curves) > 0:
@@ -2000,12 +2075,34 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                 smoothed_pressure = pressure_values
 
                             # TDC: Find where pressure is maximum (peak compression)
-                            tdc_pos = np.argmax(smoothed_pressure)
+                            # Filter positions where BOTH crank_angles AND pressure are valid
+                            valid_crank_mask = ~np.isnan(crank_angles)
+                            valid_pressure_mask = ~np.isnan(smoothed_pressure)
+                            valid_mask = valid_crank_mask & valid_pressure_mask  # Both must be valid
+
+                            if valid_mask.sum() > 0:
+                                valid_indices = np.where(valid_mask)[0]
+                                valid_pressures = smoothed_pressure[valid_mask]
+                                tdc_pos = valid_indices[np.argmax(valid_pressures)]
+                            else:
+                                tdc_pos = 0
 
                             # BDC: Find pressure minimum in first 60% of cycle (before peak compression)
                             search_end = int(len(pressure_values) * 0.6)
                             if search_end > 0:
-                                bdc_pos = np.argmin(smoothed_pressure[:search_end])
+                                search_pressures = smoothed_pressure[:search_end]
+                                search_crank_angles = crank_angles[:search_end]
+                                # Filter where BOTH crank angles AND pressure are valid
+                                search_crank_valid = ~np.isnan(search_crank_angles)
+                                search_pressure_valid = ~np.isnan(search_pressures)
+                                search_valid_mask = search_crank_valid & search_pressure_valid
+
+                                if search_valid_mask.sum() > 0:
+                                    search_valid_indices = np.where(search_valid_mask)[0]
+                                    search_valid_pressures = search_pressures[search_valid_mask]
+                                    bdc_pos = search_valid_indices[np.argmin(search_valid_pressures)]
+                                else:
+                                    bdc_pos = 0
                             else:
                                 bdc_pos = 0
 
@@ -2025,11 +2122,11 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                         line=dict(width=2, color='darkred')
                                     ),
                                     name='TDC',
-                                    hovertemplate="<b>TDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSI<extra></extra>"
+                                    hovertemplate="<b>TDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSIG<extra></extra>"
                                 ),
                                 secondary_y=False
                             )
-                            
+
                             # Add BDC marker on crank-angle chart
                             fig.add_trace(
                                 go.Scatter(
@@ -2040,23 +2137,24 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                         line=dict(width=2, color='darkblue')
                                     ),
                                     name='BDC',
-                                    hovertemplate="<b>BDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSI<extra></extra>"
+                                    hovertemplate="<b>BDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSIG<extra></extra>"
                                 ),
                                 secondary_y=False
                             )
                             
                             # Add annotations on crank-angle chart
+                            annotation_bg = "rgba(0,0,0,0.8)" if dark_theme else "rgba(255,255,255,0.8)"
                             fig.add_annotation(
                                 x=tdc_crank_angle, y=tdc_pressure,
                                 text="TDC", showarrow=True, arrowhead=2, ax=30, ay=-30,
-                                bgcolor="rgba(255,255,255,0.8)", bordercolor="red",
+                                bgcolor=annotation_bg, bordercolor="red",
                                 font=dict(color="red", size=10)
                             )
-                            
+
                             fig.add_annotation(
                                 x=bdc_crank_angle, y=bdc_pressure,
                                 text="BDC", showarrow=True, arrowhead=2, ax=-30, ay=30,
-                                bgcolor="rgba(255,255,255,0.8)", bordercolor="blue",
+                                bgcolor=annotation_bg, bordercolor="blue",
                                 font=dict(color="blue", size=10)
                             )
                             
@@ -2205,7 +2303,26 @@ def run_rule_based_diagnostics_enhanced(report_data, pressure_limit=10, valve_li
                         suggestions[item_name] = 'Valve Wear'
                 else:
                     suggestions[item_name] = 'Valve Wear'
-    
+
+    # Check for "all valves leaking" condition (cylinder-level failure)
+    # Group valves by cylinder end
+    he_valves = [item for item in report_data if 'HE' in item['name'] and item['name'] != 'Pressure']
+    ce_valves = [item for item in report_data if 'CE' in item['name'] and item['name'] != 'Pressure']
+
+    # Check if most/all valves exceed threshold (more conservative detection)
+    # Requires: 85% of valves with 2x threshold OR minimum 15 anomalies (whichever is higher)
+    for valves, end_name in [(he_valves, 'Head End'), (ce_valves, 'Crank End')]:
+        if len(valves) > 0:
+            # Count valves with significant anomalies (2x limit OR min 15)
+            high_anomaly_count = sum(1 for v in valves if v['count'] > max(valve_limit * 2, 15))
+            affected_percentage = (high_anomaly_count / len(valves)) * 100
+
+            if high_anomaly_count / len(valves) >= 0.85:  # 85% or more valves severely affected
+                critical_alerts.append(
+                    f"CRITICAL: All valves on {end_name} affected ({affected_percentage:.0f}%) - cylinder-level failure suspected"
+                )
+                suggestions[f'All Valves - {end_name}'] = 'Cylinder-Level Failure (All Valves Affected)'
+
     return suggestions, critical_alerts
 
 def check_and_display_alerts(db_client, machine_id, cylinder_name, critical_alerts, health_score):
@@ -2435,42 +2552,42 @@ def validate_pressure_signals(df, cylinder_config, pressure_options):
     Returns ✅ or ❌ for each signal based on the actual time-series data quality
     """
     validation_results = {}
-    
-    # FIXED: Check CE PT trace using actual time-series data from df (CURVES.xml)
+
+    # FIXED: Check CE PT trace using cylinder_config (works for all cylinders)
     if pressure_options.get('show_ce_pt', False):
-        # Look for CE pressure columns in the actual DataFrame
-        ce_columns = [col for col in df.columns if '.1C.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
-        
-        if ce_columns and len(ce_columns) > 0:
-            ce_pressure_data = df[ce_columns[0]]  # Use the actual time-series data
-            
+        # Get CE pressure curve from cylinder_config
+        ce_pressure_curve = cylinder_config.get('ce_pressure_curve')
+
+        if ce_pressure_curve and ce_pressure_curve in df.columns:
+            ce_pressure_data = df[ce_pressure_curve]  # Use the actual time-series data
+
             # Quality checks on the actual time-series data
             has_data = len(ce_pressure_data) > 0
             no_all_zeros = not (ce_pressure_data == 0).all()
             has_variation = ce_pressure_data.std() > 1.0  # Some variation in the data
-            reasonable_range = (ce_pressure_data.min() >= 0) and (ce_pressure_data.max() < 10000)  # Broader range
+            reasonable_range = (ce_pressure_data.min() >= -500) and (ce_pressure_data.max() < 10000)  # Allow negative (suction)
             no_excessive_spikes = (ce_pressure_data.std() < 2000)  # Not too erratic
-            
+
             is_valid = has_data and no_all_zeros and has_variation and reasonable_range and no_excessive_spikes
             validation_results['CE PT trace'] = "✅" if is_valid else "❌"
         else:
             validation_results['CE PT trace'] = "❌"  # No CE data found in time-series
-    
-    # FIXED: Check HE PT trace using actual time-series data from df (CURVES.xml)
+
+    # FIXED: Check HE PT trace using cylinder_config (works for all cylinders)
     if pressure_options.get('show_he_pt', False):
-        # Look for HE pressure columns in the actual DataFrame
-        he_columns = [col for col in df.columns if '.1H.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
-        
-        if he_columns and len(he_columns) > 0:
-            he_pressure_data = df[he_columns[0]]  # Use the actual time-series data
-            
+        # Get HE pressure curve from cylinder_config
+        he_pressure_curve = cylinder_config.get('he_pressure_curve')
+
+        if he_pressure_curve and he_pressure_curve in df.columns:
+            he_pressure_data = df[he_pressure_curve]  # Use the actual time-series data
+
             # Same quality checks as CE but on actual time-series data
             has_data = len(he_pressure_data) > 0
             no_all_zeros = not (he_pressure_data == 0).all()
-            has_variation = he_pressure_data.std() > 1.0  # Some variation in the data  
-            reasonable_range = (he_pressure_data.min() >= 0) and (he_pressure_data.max() < 10000)  # Broader range
+            has_variation = he_pressure_data.std() > 1.0  # Some variation in the data
+            reasonable_range = (he_pressure_data.min() >= -500) and (he_pressure_data.max() < 10000)  # Allow negative (suction)
             no_excessive_spikes = (he_pressure_data.std() < 2000)  # Not too erratic
-            
+
             is_valid = has_data and no_all_zeros and has_variation and reasonable_range and no_excessive_spikes
             validation_results['HE PT trace'] = "✅" if is_valid else "❌"
         else:
@@ -2504,7 +2621,10 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
     """
     if not pressure_options['enable_pressure']:
         return fig
-    
+
+    # Extract cylinder name from cylinder_config for error messages
+    cylinder_name = cylinder_config.get('cylinder_name', 'Cylinder 1')
+
     # Color scheme for different traces
     colors = {
         'he_pt': 'blue',
@@ -2516,26 +2636,26 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
         'he_terminal': 'navy',
         'ce_terminal': 'maroon'
     }
-    
-        
+
+
     # FIXED: Show CE (Crank End) pressure trace - ADD to existing plot, don't replace
     if pressure_options['show_ce_pt']:
-        # Look for CE pressure columns directly in DataFrame
-        ce_columns = [col for col in df.columns if '.1C.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
-        
-        if ce_columns:
-            ce_pressure_col = ce_columns[0]
-            
+        # Use cylinder_config to get CE pressure curve directly
+        ce_pressure_curve = cylinder_config.get('ce_pressure_curve')
+
+        if ce_pressure_curve and ce_pressure_curve in df.columns:
+            ce_pressure_col = ce_pressure_curve
+
             # Check if we already added this trace to avoid duplicates
             existing_ce_traces = [trace.name for trace in fig.data if trace.name and 'CE PT trace' in trace.name]
-            
+
             if not existing_ce_traces:  # Only add if not already present
                 # Apply period selection processing
                 processed_pressure = process_pressure_by_period(df, ce_pressure_col, pressure_options.get('period_selection', 'Median'))
-            
+
                 if processed_pressure is not None:
                     trace_name = f"CE PT trace ({pressure_options.get('period_selection', 'Median')})"
-                    
+
                     fig.add_trace(
                         go.Scatter(
                             x=df['Crank Angle'],
@@ -2552,26 +2672,26 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
             else:
                 st.sidebar.info("CE PT trace already exists")
         else:
-            st.sidebar.error("❌ No CE pressure column found in DataFrame")
+            st.sidebar.error(f"❌ No CE pressure curve found for {cylinder_name}")
     
     # FIXED: Show HE (Head End) pressure trace - ADD to existing plot, don't replace
     if pressure_options['show_he_pt']:
-        # Look for HE pressure columns directly in DataFrame  
-        he_columns = [col for col in df.columns if '.1H.' in col and ('STATIC' in col or 'SPECIAL' in col) and 'COMPRESSOR PT' in col]
-        
-        if he_columns:
-            he_pressure_col = he_columns[0]
-            
+        # Use cylinder_config to get HE pressure curve directly
+        he_pressure_curve = cylinder_config.get('he_pressure_curve')
+
+        if he_pressure_curve and he_pressure_curve in df.columns:
+            he_pressure_col = he_pressure_curve
+
             # Check if we already added this trace to avoid duplicates
             existing_he_traces = [trace.name for trace in fig.data if trace.name and 'HE PT trace' in trace.name]
-            
+
             if not existing_he_traces:  # Only add if not already present
                 # Apply period selection processing
                 processed_he_pressure = process_pressure_by_period(df, he_pressure_col, pressure_options.get('period_selection', 'Median'))
-            
+
                 if processed_he_pressure is not None:
                     trace_name = f"HE PT trace ({pressure_options.get('period_selection', 'Median')})"
-                    
+
                     fig.add_trace(
                         go.Scatter(
                             x=df['Crank Angle'],
@@ -2588,7 +2708,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
             else:
                 st.sidebar.info("HE PT trace already exists")
         else:
-            st.sidebar.error("❌ No HE pressure column found in DataFrame")
+            st.sidebar.error(f"❌ No HE pressure curve found for {cylinder_name}")
     
     # Keep existing CE Theoretical logic (THIS WORKS - DON'T CHANGE)
     if pressure_options['show_ce_theoretical']:
@@ -2760,6 +2880,7 @@ with st.sidebar:
             st.session_state.active_session_id = None
             if 'auto_discover_config' in st.session_state:
                 del st.session_state['auto_discover_config']
+            st.cache_data.clear()  # Clear Streamlit cache to load fresh data
             st.rerun()
 
     st.header("2. View Options")
@@ -2773,6 +2894,21 @@ with st.sidebar:
         0.0, 50.0, 10.0, 1.0,
         key='vertical_offset',
         help="Spacing between valve curves. Increase for better separation when multiple valves are detected."
+    )
+
+    amplitude_scale = st.slider(
+        "Valve Amplitude Scale",
+        0.1, 5.0, 1.0, 0.1,
+        key='amplitude_scale',
+        help="Scale valve vibration amplitude for better visibility (like dB zoom in analyzer)"
+    )
+
+    # Black background theme toggle
+    dark_theme = st.checkbox(
+        "Black Background Theme",
+        value=False,
+        key='dark_theme',
+        help="Use black background like traditional analyzer display"
     )
 
     # Show recommended offset based on number of valves
@@ -2815,44 +2951,7 @@ with st.sidebar:
 
     # Add pressure options here
     pressure_options = render_pressure_options_sidebar()
-    if pressure_options['enable_pressure'] and st.session_state.analysis_results is not None:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 📊 Signal Validation Status")
-        st.sidebar.markdown("*Signal quality indicators*")
-        
-        # Get current analysis results
-        df = st.session_state.analysis_results['df']
-        discovered_config = st.session_state.analysis_results['discovered_config']
-        
-        
-        # Get current cylinder selection - MATCH THE SELECTED CYLINDER
-        cylinders = discovered_config.get("cylinders", [])
-        if cylinders:
-            # FIXED: Use the actually selected cylinder, not always cylinder[0]
-            selected_cylinder_name = st.session_state.get('selected_cylinder_name', 'Cylinder 1')
-    
-            # Find the config for the currently selected cylinder
-            cylinder_config = next(
-                (c for c in cylinders if c.get("cylinder_name") == selected_cylinder_name), 
-                cylinders[0]  # Fallback to first cylinder
-            )
-    
-            st.sidebar.write(f"🔧 Validating signals for: {cylinder_config.get('cylinder_name', 'Unknown')}")    
-            
-            # Run signal validation
-            validation_status = validate_pressure_signals(df, cylinder_config, pressure_options)
-            
-            # Display validation results in a clean format
-            if validation_status:
-                for signal_name, status in validation_status.items():
-                    if status == "✅":
-                        st.sidebar.success(f"{status} {signal_name}")
-                    else:
-                        st.sidebar.error(f"{status} {signal_name}")
-            else:
-                st.sidebar.info("No pressure signals selected for validation")
 
-    
     clearance_pct = st.number_input(
         "Clearance (%)",
         min_value=0.0,
@@ -3023,10 +3122,31 @@ if validated_files:
             with st.sidebar:
                 selected_cylinder_name, selected_cylinder_config = render_cylinder_selection_sidebar(discovered_config)
 
-                                
+                # Signal Validation Status - moved here to use the correct selected cylinder
+                if pressure_options['enable_pressure'] and selected_cylinder_config:
+                    st.sidebar.markdown("---")
+                    st.sidebar.markdown("### 📊 Signal Validation Status")
+                    st.sidebar.markdown("*Signal quality indicators*")
+
+                    st.sidebar.write(f"🔧 Validating signals for: {selected_cylinder_config.get('cylinder_name', 'Unknown')}")
+
+                    # Run signal validation
+                    validation_status = validate_pressure_signals(df, selected_cylinder_config, pressure_options)
+
+                    # Display validation results in a clean format
+                    if validation_status:
+                        for signal_name, status in validation_status.items():
+                            if status == "✅":
+                                st.sidebar.success(f"{status} {signal_name}")
+                            else:
+                                st.sidebar.error(f"{status} {signal_name}")
+                    else:
+                        st.sidebar.info("No pressure signals selected for validation")
+
+
             if selected_cylinder_config:
                 # Generate plot and initial data
-                fig, temp_report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {}, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay)
+                fig, temp_report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {}, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay, amplitude_scale=amplitude_scale, dark_theme=dark_theme)
     
                 
                 # Apply pressure options to the plot (NEW!)
@@ -3165,7 +3285,7 @@ if validated_files:
                     analysis_ids[item['name']] = analysis_id
 
                 # Regenerate plot with correct analysis_ids
-                fig, report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay)
+                fig, report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay, amplitude_scale=amplitude_scale, dark_theme=dark_theme)
                 
                 # Run rule-based diagnostics on the report data
                 suggestions, critical_alerts = run_rule_based_diagnostics_enhanced(report_data, pressure_limit, valve_limit)
@@ -3189,7 +3309,72 @@ if validated_files:
                 health_report_df = generate_health_report_table(files_content['source'], files_content['levels'], cylinder_index)
                 if not health_report_df.empty:
                     st.dataframe(health_report_df, use_container_width=True, hide_index=True)
-    
+
+                # Display valve details table
+                st.subheader("🔧 Valve Sensors Detected")
+                valve_curves = selected_cylinder_config.get('valve_vibration_curves', [])
+                if valve_curves:
+                    valve_data = []
+                    for valve_info in valve_curves:
+                        valve_name = valve_info['name']
+                        # Determine cylinder end
+                        if valve_name.startswith('HE'):
+                            cyl_end = f'{cylinder_index}H'
+                            end_order = 0  # HE comes first
+                        elif valve_name.startswith('CE'):
+                            cyl_end = f'{cylinder_index}C'
+                            end_order = 1  # CE comes second
+                        else:
+                            cyl_end = 'N/A'
+                            end_order = 2
+
+                        # Determine valve type
+                        if 'Discharge' in valve_name:
+                            valve_type = 'Discharge'
+                            type_order = 0  # Discharge first
+                        elif 'Suction' in valve_name:
+                            valve_type = 'Suction'
+                            type_order = 1  # Suction second
+                        else:
+                            valve_type = 'N/A'
+                            type_order = 2
+
+                        # Determine sensor type
+                        if '(VIB)' in valve_name:
+                            sensor_type = 'Vibration'
+                        elif '(US)' in valve_name:
+                            sensor_type = 'Ultrasonic'
+                        else:
+                            sensor_type = 'N/A'
+
+                        valve_data.append({
+                            'Cyl End': cyl_end,
+                            'Valve Type': valve_type,
+                            'Valve Name': valve_name,
+                            'Sensor Type': sensor_type,
+                            '_end_order': end_order,
+                            '_type_order': type_order
+                        })
+
+                    # Sort by cylinder end (HE first) then valve type (Discharge first)
+                    valve_data.sort(key=lambda x: (x['_end_order'], x['_type_order'], x['Valve Name']))
+
+                    # Remove sorting columns before displaying
+                    for item in valve_data:
+                        del item['_end_order']
+                        del item['_type_order']
+
+                    valve_df = pd.DataFrame(valve_data)
+
+                    # Count valves by end
+                    he_count = sum(1 for v in valve_data if 'H' in v['Cyl End'])
+                    ce_count = sum(1 for v in valve_data if 'C' in v['Cyl End'])
+
+                    st.info(f"**Detected {len(valve_curves)} valves** ({he_count} on Head End, {ce_count} on Crank End)")
+                    st.dataframe(valve_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No valve sensors detected for this cylinder")
+
                 # Labeling and event marking
                 with st.expander("Add labels and mark valve events"):
                     st.subheader("Fault Labels")
@@ -3260,17 +3445,16 @@ if validated_files:
                         st.download_button("📥 Download PDF Report", pdf_buffer, f"report_{machine_id}_{selected_cylinder_name}.pdf", "application/pdf", key='download_report')
                         
 
-                
+
                 st.markdown("---")
-                # Machine Info Block
-                cfg = st.session_state.get('auto_discover_config', {})
+                # Machine Info Block - FIXED: Use current discovered_config instead of cached session state
                 st.markdown(f"""
                 <div style='border:1px solid #ddd;border-radius:6px;padding:10px;margin:8px 0;'>
-                  <strong>Machine ID:</strong> {cfg.get('machine_id','N/A')} &nbsp;|&nbsp;
-                  <strong>Model:</strong> {cfg.get('model','N/A')} &nbsp;|&nbsp;
-                  <strong>Serial:</strong> {cfg.get('serial_number','N/A')} &nbsp;|&nbsp;
-                  <strong>Rated RPM:</strong> {cfg.get('rated_rpm','N/A')} &nbsp;|&nbsp;
-                  <strong>Rated HP:</strong> {cfg.get('rated_hp','N/A')}
+                  <strong>Machine ID:</strong> {discovered_config.get('machine_id','N/A')} &nbsp;|&nbsp;
+                  <strong>Model:</strong> {discovered_config.get('model','N/A')} &nbsp;|&nbsp;
+                  <strong>Serial:</strong> {discovered_config.get('serial_number','N/A')} &nbsp;|&nbsp;
+                  <strong>Rated RPM:</strong> {discovered_config.get('rated_rpm','N/A')} &nbsp;|&nbsp;
+                  <strong>Rated HP:</strong> {discovered_config.get('rated_hp','N/A')}
                 </div>
                 """, unsafe_allow_html=True)
                 st.header("🔧 All Cylinder Details")
