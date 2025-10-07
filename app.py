@@ -3166,20 +3166,35 @@ if validated_files:
                         if isinstance(tag, dict):
                             angle = tag['angle']
                             fault_type = tag['fault_classification']
-                            annotation_text = f"{fault_type}: {angle:.1f}°"
+                            curve_name = tag.get('curve_name', '')
+                            # Include curve name if available
+                            if curve_name and curve_name != 'Unknown':
+                                annotation_text = f"{curve_name}: {fault_type} @ {angle:.1f}°"
+                            else:
+                                annotation_text = f"{fault_type}: {angle:.1f}°"
                         else:
                             # Handle legacy tags (just angles)
                             angle = tag
                             annotation_text = f"Tagged: {angle:.1f}°"
-                        
+
                         fig.add_vline(x=angle, line_dash="dash", line_color="red", line_width=2,
                                      annotation_text=annotation_text, annotation_position="top")
                     
                     # Handle pending tag classification
                     if st.session_state.pending_tag is not None:
                         st.markdown("#### 🏷️ Classify Your Tag")
-                        st.info(f"You clicked at crank angle: **{st.session_state.pending_tag:.2f}°**")
-                        
+
+                        # Handle both old (float) and new (dict) formats
+                        if isinstance(st.session_state.pending_tag, dict):
+                            pending_angle = st.session_state.pending_tag['angle']
+                            pending_curve = st.session_state.pending_tag.get('curve_name', 'Unknown')
+                            st.info(f"You clicked **{pending_curve}** at crank angle: **{pending_angle:.2f}°**")
+                        else:
+                            # Legacy format (just angle)
+                            pending_angle = st.session_state.pending_tag
+                            pending_curve = 'Unknown'
+                            st.info(f"You clicked at crank angle: **{pending_angle:.2f}°**")
+
                         col1, col2 = st.columns([3, 1])
                         with col1:
                             selected_fault_type = st.selectbox(
@@ -3193,14 +3208,15 @@ if validated_files:
                                 # Add the classified tag
                                 if plot_key not in st.session_state.valve_event_tags:
                                     st.session_state.valve_event_tags[plot_key] = []
-                                
+
                                 new_tag = {
-                                    'angle': st.session_state.pending_tag,
-                                    'fault_classification': selected_fault_type
+                                    'angle': pending_angle,
+                                    'fault_classification': selected_fault_type,
+                                    'curve_name': pending_curve
                                 }
                                 st.session_state.valve_event_tags[plot_key].append(new_tag)
                                 st.session_state.pending_tag = None
-                                st.success(f"✅ Tagged as '{selected_fault_type}' at {new_tag['angle']:.2f}°")
+                                st.success(f"✅ Tagged **{pending_curve}** as '{selected_fault_type}' at {pending_angle:.2f}°")
                                 st.rerun()
                             
                             if st.button("❌ Cancel", key="cancel_tag"):
@@ -3221,9 +3237,19 @@ if validated_files:
                         if clicked_data.selection.get('points'):
                             for point in clicked_data.selection['points']:
                                 clicked_x = point.get('x')
+                                curve_number = point.get('curve_number')
+
+                                # Get the curve name from the trace
+                                curve_name = None
+                                if curve_number is not None and curve_number < len(fig.data):
+                                    curve_name = fig.data[curve_number].name
+
                                 if clicked_x is not None and st.session_state.pending_tag is None:
-                                    # Set pending tag for classification
-                                    st.session_state.pending_tag = clicked_x
+                                    # Set pending tag for classification with curve name
+                                    st.session_state.pending_tag = {
+                                        'angle': clicked_x,
+                                        'curve_name': curve_name
+                                    }
                                     st.rerun()
                     
                     # Show current tags and save options
@@ -3233,7 +3259,8 @@ if validated_files:
                         with tags_col1:
                             for i, tag in enumerate(existing_tags):
                                 if isinstance(tag, dict):
-                                    st.write(f"• **{tag['fault_classification']}** at {tag['angle']:.2f}°")
+                                    curve_name = tag.get('curve_name', 'Unknown curve')
+                                    st.write(f"• **{curve_name}**: {tag['fault_classification']} at {tag['angle']:.2f}°")
                                 else:
                                     # Handle legacy tags
                                     st.write(f"• Legacy tag: {tag:.2f}°")
