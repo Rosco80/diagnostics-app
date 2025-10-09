@@ -1945,30 +1945,37 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     # Query valve events for this curve
                     events_raw = _db_client.execute(
                         "SELECT curve_type, crank_angle FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
-                        (session_id, cylinder_name, vc['name'])
+                        (session_id, cylinder_name, curve_name)
                     ).rows
 
                     # Only process events if we have data
                     if events_raw:
                         events = {etype: angle for etype, angle in events_raw}
-                        if 'open' in events and 'close' in events:
-                            fig.add_vrect(
-                                x0=events['open'],
-                                x1=events['close'],
-                                fillcolor=color_rgba.replace('0.4','0.2'),
-                                layer="below",
-                                line_width=0
-                            )
+                        # Clean visualization: colored triangles at valve's vertical position
+                        # Annotations shown on hover only
                         for event_type, crank_angle in events.items():
-                            fig.add_vline(
-                                x=crank_angle,
-                                line_width=2,
-                                line_dash="dash",
-                                line_color='green' if event_type == 'open' else 'red'
+                            # Use marker symbol instead of annotation
+                            marker_symbol = "triangle-up" if event_type == 'open' else "triangle-down"
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=[crank_angle],
+                                    y=[current_offset],  # Position at valve's vertical offset
+                                    mode='markers',
+                                    marker=dict(
+                                        symbol=marker_symbol,
+                                        size=18,  # Bigger markers
+                                        color=color_rgba.replace('0.4','1'),
+                                        line=dict(width=2, color='white')
+                                    ),
+                                    name=f"{label_name} {event_type.capitalize()}",
+                                    showlegend=False,
+                                    hovertemplate=f"<b>{label_name}</b><br>{event_type.capitalize()}: {crank_angle}°<extra></extra>",
+                                ),
+                                secondary_y=True
                             )
                     # No warning needed when no valve events exist - this is normal
-            except Exception as e:
-                st.warning(f"Could not load valve events for {vc['name']}: {e}")
+            except Exception:
+                pass  # Silently skip if valve events can't be loaded
         
         # Add anomaly data to report
         anomaly_count = int(df[f'{curve_name}_anom'].sum())
@@ -2196,12 +2203,13 @@ def render_ai_model_tuning_section(db_client, discovered_config):
     
     if machine_id and machine_id != 'N/A':
         st.markdown(f"**Machine-Specific Configuration** for `{machine_id}`")
-        
+
         # Load existing config from database
         try:
             rs = db_client.execute("SELECT * FROM configs WHERE machine_id = ?", (machine_id,))
             existing_config = rs.rows[0] if rs.rows else None
-        except Exception:
+        except Exception as e:
+            st.warning(f"⚠️ Could not load saved configuration: {str(e)}")
             existing_config = None
         
         # Configuration inputs with saved values
@@ -2502,17 +2510,8 @@ def render_pressure_options_sidebar():
         # Pressure Traces Section
         st.sidebar.markdown("**Pressure Traces:**")
         pressure_options['show_he_pt'] = st.sidebar.checkbox("Show HE PT trace", key='show_he_pt')
-        pressure_options['show_he_theoretical'] = st.sidebar.checkbox("Show HE Theoretical", key='show_he_theoretical')
         pressure_options['show_ce_pt'] = st.sidebar.checkbox("Show CE PT trace", value=True, key='show_ce_pt')
-        pressure_options['show_ce_theoretical'] = st.sidebar.checkbox("Show CE Theoretical", key='show_ce_theoretical')
-        
-        # Additional Pressures Section  
-        st.sidebar.markdown("**Additional Pressures:**")
-        pressure_options['show_he_nozzle'] = st.sidebar.checkbox("Show HE Nozzle pressure", key='show_he_nozzle')
-        pressure_options['show_ce_nozzle'] = st.sidebar.checkbox("Show CE Nozzle pressure", key='show_ce_nozzle')
-        pressure_options['show_he_terminal'] = st.sidebar.checkbox("Show HE Terminal pressure", key='show_he_terminal')
-        pressure_options['show_ce_terminal'] = st.sidebar.checkbox("Show CE Terminal pressure", key='show_ce_terminal')
-        
+
         # Period Selection
         st.sidebar.markdown("**Pressure Period Selection:**")
         period_options = [
@@ -2533,13 +2532,7 @@ def render_pressure_options_sidebar():
         # Set all options to False if pressure analysis is disabled
         pressure_options.update({
             'show_he_pt': False,
-            'show_he_theoretical': False, 
             'show_ce_pt': False,
-            'show_ce_theoretical': False,
-            'show_he_nozzle': False,
-            'show_ce_nozzle': False,
-            'show_he_terminal': False,
-            'show_ce_terminal': False,
             'period_selection': "Median",
             'use_crc_data': False
         })
@@ -2592,27 +2585,7 @@ def validate_pressure_signals(df, cylinder_config, pressure_options):
             validation_results['HE PT trace'] = "✅" if is_valid else "❌"
         else:
             validation_results['HE PT trace'] = "❌"  # No HE data found in time-series
-    
-    # Check CE Theoretical (this always works since it's generated)
-    if pressure_options.get('show_ce_theoretical', False):
-        validation_results['CE Theoretical'] = "✅"
-    
-    # Check HE Theoretical (this always works since it's generated)
-    if pressure_options.get('show_he_theoretical', False):
-        validation_results['HE Theoretical'] = "✅"
-    
-    # Check additional pressure traces (currently not available)
-    additional_checks = [
-        ('show_ce_nozzle', 'CE Nozzle pressure'),
-        ('show_he_nozzle', 'HE Nozzle pressure'), 
-        ('show_ce_terminal', 'CE Terminal pressure'),
-        ('show_he_terminal', 'HE Terminal pressure')
-    ]
-    
-    for option_key, display_name in additional_checks:
-        if pressure_options.get(option_key, False):
-            validation_results[display_name] = "❌"  # Currently no data available for these
-    
+
     return validation_results
 
 def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, files_content):
@@ -2709,85 +2682,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
                 st.sidebar.info("HE PT trace already exists")
         else:
             st.sidebar.error(f"❌ No HE pressure curve found for {cylinder_name}")
-    
-    # Keep existing CE Theoretical logic (THIS WORKS - DON'T CHANGE)
-    if pressure_options['show_ce_theoretical']:
-        try:
-            import numpy as np
-            
-            theta_rad = np.deg2rad(df['Crank Angle'])
-            suction_pressure = 690.0
-            discharge_pressure = 1550.0
-            pressure_amplitude = (discharge_pressure - suction_pressure) / 2
-            pressure_baseline = suction_pressure + pressure_amplitude
-            theoretical_ce = pressure_baseline + pressure_amplitude * np.sin(theta_rad)
-            
-            # Check if CE Theoretical already exists
-            existing_ce_theoretical = [trace.name for trace in fig.data if trace.name and 'CE Theoretical' in trace.name]
-            
-            if not existing_ce_theoretical:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['Crank Angle'],
-                        y=theoretical_ce,
-                        name='CE Theoretical (Test)',
-                        line=dict(color=colors['ce_theoretical'], width=2, dash='dash'),
-                        mode='lines'
-                    ),
-                    secondary_y=False
-                )
-                st.sidebar.success("✅ Added CE Theoretical")
-            else:
-                st.sidebar.info("CE Theoretical already exists")
-        except Exception as e:
-            st.sidebar.error(f"❌ CE Theoretical failed: {str(e)}")
-    
-    # Add HE Theoretical  
-    if pressure_options['show_he_theoretical']:
-        try:
-            import numpy as np
-            
-            theta_rad = np.deg2rad(df['Crank Angle'])
-            # Use slightly different values for HE to distinguish from CE
-            suction_pressure = 680.0
-            discharge_pressure = 1520.0
-            pressure_amplitude = (discharge_pressure - suction_pressure) / 2
-            pressure_baseline = suction_pressure + pressure_amplitude
-            theoretical_he = pressure_baseline + pressure_amplitude * np.cos(theta_rad + np.pi/6)  # Phase shift
-            
-            # Check if HE Theoretical already exists
-            existing_he_theoretical = [trace.name for trace in fig.data if trace.name and 'HE Theoretical' in trace.name]
-            
-            if not existing_he_theoretical:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['Crank Angle'],
-                        y=theoretical_he,
-                        name='HE Theoretical',
-                        line=dict(color=colors['he_theoretical'], width=3, dash='dash'),
-                        mode='lines'
-                    ),
-                    secondary_y=False
-                )
-                st.sidebar.success("✅ Added HE Theoretical")
-            else:
-                st.sidebar.info("HE Theoretical already exists")
-        except Exception as e:
-            st.sidebar.error(f"❌ HE Theoretical failed: {str(e)}")
-    
-    # Additional pressure traces (keep existing - these show info messages)
-    if pressure_options['show_ce_nozzle']:
-        st.sidebar.info("CE Nozzle pressure data not available in current dataset")
-    
-    if pressure_options['show_he_nozzle']:
-        st.sidebar.info("HE Nozzle pressure data not available in current dataset")
-        
-    if pressure_options['show_ce_terminal']:
-        st.sidebar.info("CE Terminal pressure data not available in current dataset")
-        
-    if pressure_options['show_he_terminal']:
-        st.sidebar.info("HE Terminal pressure data not available in current dataset")
-    
+
     return fig
 
 def process_pressure_by_period(df, pressure_curve, period_selection, rpm=600):
@@ -3295,9 +3190,9 @@ if validated_files:
                             if st.button("🗑️ Clear Tags", key="clear_tags"):
                                 st.session_state.valve_event_tags[plot_key] = []
                                 st.rerun()
-                else:
-                    st.plotly_chart(fig, use_container_width=True)
-                
+                # else:
+                #     st.plotly_chart(fig, use_container_width=True)  # REMOVED: Duplicate plot without valve events
+
                 # Create or update analysis records in DB
                 analysis_ids = {}
                 for item in temp_report_data:
@@ -3311,9 +3206,16 @@ if validated_files:
                         analysis_id = get_last_row_id(db_client)
                     analysis_ids[item['name']] = analysis_id
 
-                # Regenerate plot with correct analysis_ids
+                # Regenerate plot with correct analysis_ids (THIS PLOT HAS VALVE EVENTS!)
                 fig, report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, analysis_ids, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay, amplitude_scale=amplitude_scale, dark_theme=dark_theme)
-                
+
+                # Apply pressure options to the regenerated plot
+                if view_mode == "Crank-angle":
+                    fig = apply_pressure_options_to_plot(fig, df.copy(), selected_cylinder_config, pressure_options, files_content)
+
+                # Display the regenerated plot with valve events (replaces the earlier plot)
+                st.plotly_chart(fig, use_container_width=True, key=f"updated_plot_{selected_cylinder_name}")
+
                 # Run rule-based diagnostics on the report data
                 suggestions, critical_alerts = run_rule_based_diagnostics_enhanced(report_data, pressure_limit, valve_limit)
                 
@@ -3440,25 +3342,73 @@ if validated_files:
                                         )
                                         st.success(f"Label '{final_label}' saved for {item['name']}.")
 
-                    st.subheader("Mark Valve Open/Close Events")
-                    for item in report_data:
-                        if item['name'] != 'Pressure':
-                            # FIXED: Use curve_name for unique keys instead of name
-                            curve_key = item['curve_name'].replace(' ', '_').replace('.', '_').replace('-', '_')
-                            with st.form(key=f"valve_form_{curve_key}"):
-                                st.write(f"**{item['name']} Valve Events:**")
-                                cols = st.columns(2)
-                                open_angle = cols[0].number_input("Open Angle", key=f"open_{curve_key}", value=None, format="%.2f")
-                                close_angle = cols[1].number_input("Close Angle", key=f"close_{curve_key}", value=None, format="%.2f")
-                                if st.form_submit_button(f"Save Events for {item['name']}"):
-                                    # Clear existing valve events for this curve
-                                    db_client.execute("DELETE FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
-                                    if open_angle is not None:
-                                        db_client.execute("INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], open_angle, 0.0, 'open'))
-                                    if close_angle is not None:
-                                        db_client.execute("INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], close_angle, 0.0, 'close'))
-                                    st.success(f"Events updated for {item['name']}.")
+                    with st.expander("⚙️ Configure Valve Open/Close Events", expanded=False):
+                        st.info("💡 Set valve timing for each curve. Values are in crank angle degrees.")
+
+                        # Load existing valve events from database
+                        valve_data = {}
+                        for item in report_data:
+                            if item['name'] != 'Pressure':
+                                events_rs = db_client.execute(
+                                    "SELECT curve_type, crank_angle FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+                                    (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'])
+                                )
+                                events = {e[0]: e[1] for e in events_rs.rows}
+                                valve_data[item['name']] = {
+                                    'curve_name': item['curve_name'],
+                                    'open': events.get('open'),
+                                    'close': events.get('close')
+                                }
+
+                        # Single form for all valves
+                        with st.form("all_valve_events"):
+                            st.markdown("**Valve Timing Configuration**")
+                            for valve_name, data in valve_data.items():
+                                cols = st.columns([3, 2, 2])
+                                cols[0].write(f"**{valve_name}**")
+                                open_val = cols[1].number_input(
+                                    "Open°",
+                                    value=data['open'],
+                                    key=f"open_{valve_name}",
+                                    format="%.2f",
+                                    help="Valve opening angle"
+                                )
+                                close_val = cols[2].number_input(
+                                    "Close°",
+                                    value=data['close'],
+                                    key=f"close_{valve_name}",
+                                    format="%.2f",
+                                    help="Valve closing angle"
+                                )
+                                valve_data[valve_name]['open_input'] = open_val
+                                valve_data[valve_name]['close_input'] = close_val
+
+                            if st.form_submit_button("💾 Save All Valve Events", type="primary"):
+                                try:
+                                    saved_count = 0
+                                    for valve_name, data in valve_data.items():
+                                        # Clear existing events
+                                        db_client.execute(
+                                            "DELETE FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+                                            (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'])
+                                        )
+                                        # Save new events
+                                        if data['open_input'] is not None:
+                                            db_client.execute(
+                                                "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
+                                                (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['open_input'], 0.0, 'open')
+                                            )
+                                            saved_count += 1
+                                        if data['close_input'] is not None:
+                                            db_client.execute(
+                                                "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
+                                                (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['close_input'], 0.0, 'close')
+                                            )
+                                            saved_count += 1
+                                    st.success(f"✅ Saved {saved_count} valve events successfully!")
                                     st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Failed to save valve events: {str(e)}")
 
                 # Export and Cylinder Details
                                     
