@@ -46,17 +46,7 @@ FAULT_LABELS = [
 ]
 
 # Tagging-specific fault classifications (aligned with supervised learning goals)
-TAG_FAULT_TYPES = [
-    "Leaking valves",
-    "Worn piston rings", 
-    "Rod loading issues",
-    "Valve timing problems",
-    "Intercooler fouling",
-    "Pressure anomaly",
-    "Vibration spike",
-    "Noise event",
-    "Other fault"
-]
+TAG_FAULT_TYPES = FAULT_LABELS
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -3214,7 +3204,9 @@ if validated_files:
                     fig = apply_pressure_options_to_plot(fig, df.copy(), selected_cylinder_config, pressure_options, files_content)
 
                 # Display the regenerated plot with valve events (replaces the earlier plot)
-                st.plotly_chart(fig, use_container_width=True, key=f"updated_plot_{selected_cylinder_name}")
+                # Only display if NOT in interactive tagging mode (which already displayed the plot above)
+                if not (interactive_tagging and view_mode == "Crank-angle"):
+                    st.plotly_chart(fig, use_container_width=True, key=f"updated_plot_{selected_cylinder_name}")
 
                 # Run rule-based diagnostics on the report data
                 suggestions, critical_alerts = run_rule_based_diagnostics_enhanced(report_data, pressure_limit, valve_limit)
