@@ -7,7 +7,6 @@ import xml.etree.ElementTree as ET
 import re
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import io
 import datetime
 import time
@@ -1843,7 +1842,23 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         )
 
     # Add valve vibration curves
-    colors = plt.cm.viridis(np.linspace(0, 1, len(valve_curves)))
+    # Custom high-contrast, colorblind-friendly palette
+    distinct_colors = [
+        (0.12, 0.47, 0.71),  # Dark Blue
+        (1.0, 0.50, 0.05),   # Orange
+        (0.17, 0.63, 0.17),  # Green
+        (0.84, 0.15, 0.16),  # Red
+        (0.58, 0.40, 0.74),  # Purple
+        (0.09, 0.75, 0.81),  # Cyan
+        (0.89, 0.47, 0.76),  # Pink
+        (0.74, 0.74, 0.13),  # Yellow-Green
+        (0.55, 0.34, 0.29),  # Brown
+        (0.84, 0.20, 0.65),  # Magenta
+        (0.0, 0.55, 0.55),   # Teal
+        (0.50, 0.50, 0.50),  # Gray
+    ]
+    # Cycle through colors if more valves than colors
+    colors = [distinct_colors[i % len(distinct_colors)] for i in range(len(valve_curves))]
     current_offset = 0
 
     for i, vc in enumerate(valve_curves):
