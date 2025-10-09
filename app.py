@@ -807,9 +807,9 @@ def compute_health_score(report_data, diagnostics):
     score = 100
     # Subtract one point per anomaly detected
     for item in report_data:
-        score -= item['count'] * 0.5
+        score -= item['count'] * 0.2
     # Subtract an additional five points per diagnostic rule triggered
-    score -= 2 * len(diagnostics)
+    score -= 5 * len(diagnostics)
     # Keep the score within 0–100
     return max(min(score, 100), 0)
     
@@ -2243,7 +2243,7 @@ def render_ai_model_tuning_section(db_client, discovered_config):
             )
             
             # Save button
-            if st.button("💾 Save Machine Config", type="primary"):
+            if st.button("💾 Save Configuration", type="primary"):
                 try:
                     db_client.execute(
                         "INSERT OR REPLACE INTO configs (machine_id, contamination, pressure_anom_limit, valve_anom_limit, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
