@@ -3094,8 +3094,26 @@ if validated_files:
             if selected_cylinder_config:
                 # Generate plot and initial data
                 fig, temp_report_data = generate_cylinder_view(db_client, df.copy(), selected_cylinder_config, envelope_view, vertical_offset, {}, contamination_level, view_mode=view_mode, clearance_pct=clearance_pct, show_pv_overlay=show_pv_overlay, amplitude_scale=amplitude_scale, dark_theme=dark_theme)
-    
-                
+
+                # Create mapping from trace display names to actual column names
+                # This is needed because Streamlit's on_select doesn't pass customdata
+                curve_name_mapping = {}
+                for trace in fig.data:
+                    trace_name = trace.name  # Display name (e.g., "CE Discharge 2 (US)" or "CE Discharge 2 (US) Anomalies")
+                    if trace_name:  # Skip traces without names
+                        # Find matching column name in temp_report_data
+                        for item in temp_report_data:
+                            item_name = item.get('name', '')
+                            # Match if item name appears in trace name (handles both regular and "Anomalies" suffix)
+                            if item_name and item_name in trace_name:
+                                curve_name_mapping[trace_name] = item['curve_name']
+                                break
+
+                # Store mapping in session state for access in click handler
+                if 'curve_name_mapping' not in st.session_state:
+                    st.session_state.curve_name_mapping = {}
+                st.session_state.curve_name_mapping[selected_cylinder_name] = curve_name_mapping
+
                 # Apply pressure options to the plot (NEW!)
                 if view_mode == "Crank-angle":  # Only apply to crank-angle view
                     fig = apply_pressure_options_to_plot(fig, df.copy(), selected_cylinder_config, pressure_options, files_content)
@@ -3186,22 +3204,22 @@ if validated_files:
                                 clicked_x = point.get('x')
                                 curve_number = point.get('curve_number')
 
-                                # Get the ACTUAL curve column name from customdata (not display name!)
-                                curve_name = None
+                                # Get the curve name from the clicked trace
+                                display_name = None
                                 if curve_number is not None and curve_number < len(fig.data):
-                                    # Try to get customdata first (actual column name)
-                                    customdata = point.get('customdata')
-                                    if customdata and len(customdata) > 0:
-                                        curve_name = customdata[0]  # Actual column name
-                                    else:
-                                        # Fallback to display name if customdata not available
-                                        curve_name = fig.data[curve_number].name
+                                    display_name = fig.data[curve_number].name
 
-                                if clicked_x is not None and st.session_state.pending_tag is None:
-                                    # Set pending tag for classification with actual column name
+                                # Translate display name to actual column name using mapping
+                                actual_curve_name = display_name
+                                if display_name and selected_cylinder_name in st.session_state.get('curve_name_mapping', {}):
+                                    mapping = st.session_state.curve_name_mapping[selected_cylinder_name]
+                                    actual_curve_name = mapping.get(display_name, display_name)
+
+                                if clicked_x is not None and st.session_state.pending_tag is None and actual_curve_name:
+                                    # Set pending tag for classification with ACTUAL column name
                                     st.session_state.pending_tag = {
                                         'angle': clicked_x,
-                                        'curve_name': curve_name
+                                        'curve_name': actual_curve_name
                                     }
                                     st.rerun()
                     
@@ -3244,6 +3262,15 @@ if validated_files:
                                     st.write("**Tag curve names:**")
                                     for curve in tag_curves:
                                         st.write(f"  - `{curve}`")
+
+                                    # Show the mapping
+                                    st.write("**Display Name → Column Name Mapping:**")
+                                    if selected_cylinder_name in st.session_state.get('curve_name_mapping', {}):
+                                        mapping = st.session_state.curve_name_mapping[selected_cylinder_name]
+                                        for display, actual in mapping.items():
+                                            st.write(f"  - `{display}` → `{actual}`")
+                                    else:
+                                        st.write("  (No mapping found)")
 
                                 for item in temp_report_data:
                                     # Get or create analysis ID for this curve
