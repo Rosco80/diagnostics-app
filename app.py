@@ -11,7 +11,6 @@ import io
 import datetime
 import time
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import libsql_client
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler
@@ -1860,7 +1859,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         return fig, report_data
 
     # --- Crank-angle mode OR Dual view mode ---
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig = go.Figure()
     
     # Add pressure curve to crank-angle plot
     if pressure_curve and pressure_curve in df.columns:
@@ -1882,9 +1881,18 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 name='Pressure (PSIG)',
                 line=dict(color=pressure_color, width=2),
                 customdata=[[pressure_curve]] * len(df)  # Store actual column name
-            ),
-            secondary_y=False
+            )
         )
+
+    # Calculate valve scaling factor to fit within pressure range
+    # Scale valve curves (typically 0-30 G) to ~15% of pressure visual space
+    valve_scale_factor = 1.0  # Default if no pressure curve
+    if pressure_curve and pressure_curve in df.columns:
+        pressure_range = df[pressure_curve].max() - df[pressure_curve].min()
+        # Assume typical valve vibration max is 30 G
+        typical_valve_max = 30.0
+        # Scale so 30 G takes up 15% of pressure range visually
+        valve_scale_factor = (pressure_range * 0.15) / typical_valve_max
 
     # Add valve vibration curves
     # Custom high-contrast, colorblind-friendly palette
@@ -1904,18 +1912,17 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
     ]
     # Cycle through colors if more valves than colors
     colors = [distinct_colors[i % len(distinct_colors)] for i in range(len(valve_curves))]
-    current_offset = 0
 
     for i, vc in enumerate(valve_curves):
         curve_name, label_name = vc['curve'], vc['name']
         if curve_name not in df.columns:
             continue
-            
+
         color_rgba = f'rgba({colors[i][0]*255},{colors[i][1]*255},{colors[i][2]*255},0.4)'
 
         if envelope_view:
-            upper_bound = (df[curve_name] * amplitude_scale) + current_offset
-            lower_bound = (-df[curve_name] * amplitude_scale) + current_offset
+            upper_bound = df[curve_name] * amplitude_scale * valve_scale_factor
+            lower_bound = -df[curve_name] * amplitude_scale * valve_scale_factor
             fig.add_trace(
                 go.Scatter(
                     x=df['Crank Angle'],
@@ -1924,8 +1931,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     line=dict(width=0.5, color=color_rgba.replace('0.4','1')),
                     showlegend=False,
                     hoverinfo='none'
-                ),
-                secondary_y=True
+                )
             )
             fig.add_trace(
                 go.Scatter(
@@ -1938,11 +1944,10 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     name=label_name,
                     hoverinfo='none',
                     customdata=[[curve_name]] * len(df)  # Store actual column name
-                ),
-                secondary_y=True
+                )
             )
         else:
-            vibration_data = (df[curve_name] * amplitude_scale) + current_offset
+            vibration_data = df[curve_name] * amplitude_scale * valve_scale_factor
             fig.add_trace(
                 go.Scatter(
                     x=df['Crank Angle'],
@@ -1951,14 +1956,13 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     mode='lines',
                     line=dict(color=color_rgba.replace('0.4','1')),
                     customdata=[[curve_name]] * len(df)  # Store actual column name
-                ),
-                secondary_y=True
+                )
             )
 
         # Add anomalies with confidence coloring
         anomalies_df = df[df[f'{curve_name}_anom']]
         if not anomalies_df.empty:
-            anomaly_vibration_data = (anomalies_df[curve_name] * amplitude_scale) + current_offset
+            anomaly_vibration_data = anomalies_df[curve_name] * amplitude_scale * valve_scale_factor
             fig.add_trace(
                 go.Scatter(
                     x=anomalies_df['Crank Angle'],
@@ -1980,8 +1984,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                         )
                     ],
                     showlegend=False
-                ),
-                secondary_y=True
+                )
             )
             
 
@@ -2008,10 +2011,16 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                         for event_type, crank_angle in events.items():
                             # Use marker symbol instead of annotation
                             marker_symbol = "triangle-up" if event_type == 'open' else "triangle-down"
+                            # Get valve value at this crank angle for marker position
+                            valve_y_pos = 0
+                            if crank_angle in df['Crank Angle'].values:
+                                idx = df[df['Crank Angle'] == crank_angle].index[0]
+                                valve_y_pos = df.loc[idx, curve_name] * amplitude_scale * valve_scale_factor
+
                             fig.add_trace(
                                 go.Scatter(
                                     x=[crank_angle],
-                                    y=[current_offset],  # Position at valve's vertical offset
+                                    y=[valve_y_pos],  # Position at valve's actual value
                                     mode='markers',
                                     marker=dict(
                                         symbol=marker_symbol,
@@ -2022,8 +2031,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                     name=f"{label_name} {event_type.capitalize()}",
                                     showlegend=False,
                                     hovertemplate=f"<b>{label_name}</b><br>{event_type.capitalize()}: {crank_angle}°<extra></extra>",
-                                ),
-                                secondary_y=True
+                                )
                             )
                     # No warning needed when no valve events exist - this is normal
             except Exception:
@@ -2039,8 +2047,6 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
             "count": anomaly_count,
             "unit": "G"
         })
-        
-        current_offset += vertical_offset
 
     # Set up layout
     title_suffix = " with P-V Overlay" if show_pv_overlay else ""
@@ -2056,11 +2062,9 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
             font=dict(color='white'),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='white')),
             xaxis=dict(gridcolor='#444444', zerolinecolor='#666666'),
-            yaxis=dict(gridcolor='#444444', zerolinecolor='#666666'),
-            yaxis2=dict(gridcolor='#444444', zerolinecolor='#666666')
+            yaxis=dict(gridcolor='#444444', zerolinecolor='#666666')
         )
-        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="white", secondary_y=False)
-        fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="cyan", secondary_y=True)
+        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="white")
     else:
         fig.update_layout(
             height=900,
@@ -2069,8 +2073,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
             template="ggplot2",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black", secondary_y=False)
-        fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
+        fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black")
 
     # Set explicit primary Y-axis range to prevent valve data from affecting pressure scale
     # Find ALL pressure-related columns (including CE and HE traces that may be added later)
@@ -2094,23 +2097,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         # Ensure we show negative pressures (suction) if they exist
         if p_min > -20:
             p_min = -20  # Show at least some negative range for context
-        fig.update_yaxes(range=[p_min, p_max], secondary_y=False)
-
-    # FIXED: Simplified Y-axis range for valves based on typical vibration data
-    if len(valve_curves) > 0:
-        # Typical vibration range is 0-30 G
-        # With amplitude_scale and offset, calculate expected range
-        # Assume max vibration ~30 G, scale it, then add offsets for stacking
-        typical_max_vibration = 30
-        total_offset = (len(valve_curves) - 1) * vertical_offset
-        max_scaled_value = (typical_max_vibration * amplitude_scale) + total_offset
-
-        # Add 20% padding above, small padding below
-        y_max = max_scaled_value * 1.2
-        y_min = -5  # Small negative space for visual balance
-
-        # Apply the calculated range to the secondary Y-axis (valves)
-        fig.update_yaxes(range=[y_min, y_max], secondary_y=True)
+        fig.update_yaxes(range=[p_min, p_max])
 
     # --- ADD P-V OVERLAY if requested ---
     if show_pv_overlay and view_mode == "Crank-angle" and can_plot_pv:
@@ -2141,8 +2128,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                         "<extra></extra>",
                             customdata=V,
                             opacity=0.7
-                        ),
-                        secondary_y=False
+                        )
                     )
 
                     try:
@@ -2212,8 +2198,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                     ),
                                     name='TDC',
                                     hovertemplate="<b>TDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSIG<extra></extra>"
-                                ),
-                                secondary_y=False
+                                )
                             )
 
                             # Add BDC marker on crank-angle chart
@@ -2227,8 +2212,7 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                                     ),
                                     name='BDC',
                                     hovertemplate="<b>BDC</b><br>Angle: %{x:.1f}°<br>Pressure: %{y:.1f} PSIG<extra></extra>"
-                                ),
-                                secondary_y=False
+                                )
                             )
                             
                             # Add annotations on crank-angle chart
@@ -2718,8 +2702,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
                             name=trace_name,
                             line=dict(color=colors['ce_pt'], width=2, dash='solid'),
                             mode='lines'
-                        ),
-                        secondary_y=False
+                        )
                     )
                     st.sidebar.success(f"✅ Added {trace_name}")
                 else:
@@ -2754,8 +2737,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
                             name=trace_name,
                             line=dict(color=colors['he_pt'], width=2, dash='solid'),
                             mode='lines'
-                        ),
-                        secondary_y=False
+                        )
                     )
                     st.sidebar.success(f"✅ Added {trace_name}")
                 else:
@@ -2785,7 +2767,7 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
         # Ensure we show negative pressures (suction) if they exist
         if p_min > -20:
             p_min = -20
-        fig.update_yaxes(range=[p_min, p_max], secondary_y=False)
+        fig.update_yaxes(range=[p_min, p_max])
 
     return fig
 
@@ -2890,9 +2872,9 @@ with st.sidebar:
     
     vertical_offset = st.slider(
         "Vertical Offset",
-        0.0, 50.0, 5.0, 1.0,
+        0.0, 50.0, 0.0, 1.0,
         key='vertical_offset',
-        help="Spacing between valve curves. Increase for better separation when multiple valves are detected."
+        help="Offset stacking for valve curves (0 = no stacking, overlaid view like client app)"
     )
 
     amplitude_scale = st.slider(
