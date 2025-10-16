@@ -2073,10 +2073,27 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
     # Set explicit primary Y-axis range to prevent valve data from affecting pressure scale
+    # Find ALL pressure-related columns (including CE and HE traces that may be added later)
+    pressure_columns = []
     if pressure_curve and pressure_curve in df.columns:
-        pressure_data = df[pressure_curve]
-        p_min = max(0, pressure_data.min() - 50)  # Start at 0 or slightly below min
-        p_max = pressure_data.max() + 50  # Add padding above max
+        pressure_columns.append(pressure_curve)
+
+    # Also check for CE and HE pressure curves
+    ce_pressure = cylinder_config.get('ce_pressure_curve')
+    he_pressure = cylinder_config.get('he_pressure_curve')
+    if ce_pressure and ce_pressure in df.columns:
+        pressure_columns.append(ce_pressure)
+    if he_pressure and he_pressure in df.columns:
+        pressure_columns.append(he_pressure)
+
+    if pressure_columns:
+        # Get min/max across ALL pressure columns
+        all_pressure_data = pd.concat([df[col] for col in pressure_columns])
+        p_min = all_pressure_data.min() - 50
+        p_max = all_pressure_data.max() + 50
+        # Ensure we show negative pressures (suction) if they exist
+        if p_min > -20:
+            p_min = -20  # Show at least some negative range for context
         fig.update_yaxes(range=[p_min, p_max], secondary_y=False)
 
     # FIXED: Simplified Y-axis range for valves based on typical vibration data
@@ -2747,6 +2764,28 @@ def apply_pressure_options_to_plot(fig, df, cylinder_config, pressure_options, f
                 st.sidebar.info("HE PT trace already exists")
         else:
             st.sidebar.error(f"❌ No HE pressure curve found for {cylinder_name}")
+
+    # Re-calculate and set Y-axis range based on ALL pressure traces now in the plot
+    # This ensures the range stays correct after adding CE/HE traces
+    pressure_traces_data = []
+    for trace in fig.data:
+        # Collect data from all traces on primary Y-axis (pressure traces)
+        # If yaxis is not set or is 'y', it's on primary axis
+        # If yaxis is 'y2', it's on secondary axis (valves)
+        trace_yaxis = getattr(trace, 'yaxis', 'y')  # Default to 'y' if not set
+        if trace_yaxis != 'y2':  # Primary axis only
+            if trace.y is not None and len(trace.y) > 0:
+                # Filter out None values and convert to float
+                valid_y_values = [float(y) for y in trace.y if y is not None and not (isinstance(y, float) and pd.isna(y))]
+                pressure_traces_data.extend(valid_y_values)
+
+    if pressure_traces_data:
+        p_min = min(pressure_traces_data) - 50
+        p_max = max(pressure_traces_data) + 50
+        # Ensure we show negative pressures (suction) if they exist
+        if p_min > -20:
+            p_min = -20
+        fig.update_yaxes(range=[p_min, p_max], secondary_y=False)
 
     return fig
 
