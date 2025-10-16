@@ -1880,7 +1880,8 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                 x=df['Crank Angle'],
                 y=df[pressure_curve],
                 name='Pressure (PSIG)',
-                line=dict(color=pressure_color, width=2)
+                line=dict(color=pressure_color, width=2),
+                customdata=[[pressure_curve]] * len(df)  # Store actual column name
             ),
             secondary_y=False
         )
@@ -1935,7 +1936,8 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     fill='tonexty',
                     fillcolor=color_rgba,
                     name=label_name,
-                    hoverinfo='none'
+                    hoverinfo='none',
+                    customdata=[[curve_name]] * len(df)  # Store actual column name
                 ),
                 secondary_y=True
             )
@@ -1947,7 +1949,8 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
                     y=vibration_data,
                     name=label_name,
                     mode='lines',
-                    line=dict(color=color_rgba.replace('0.4','1'))
+                    line=dict(color=color_rgba.replace('0.4','1')),
+                    customdata=[[curve_name]] * len(df)  # Store actual column name
                 ),
                 secondary_y=True
             )
@@ -3183,13 +3186,19 @@ if validated_files:
                                 clicked_x = point.get('x')
                                 curve_number = point.get('curve_number')
 
-                                # Get the curve name from the trace
+                                # Get the ACTUAL curve column name from customdata (not display name!)
                                 curve_name = None
                                 if curve_number is not None and curve_number < len(fig.data):
-                                    curve_name = fig.data[curve_number].name
+                                    # Try to get customdata first (actual column name)
+                                    customdata = point.get('customdata')
+                                    if customdata and len(customdata) > 0:
+                                        curve_name = customdata[0]  # Actual column name
+                                    else:
+                                        # Fallback to display name if customdata not available
+                                        curve_name = fig.data[curve_number].name
 
                                 if clicked_x is not None and st.session_state.pending_tag is None:
-                                    # Set pending tag for classification with curve name
+                                    # Set pending tag for classification with actual column name
                                     st.session_state.pending_tag = {
                                         'angle': clicked_x,
                                         'curve_name': curve_name
@@ -3204,7 +3213,16 @@ if validated_files:
                             for i, tag in enumerate(existing_tags):
                                 if isinstance(tag, dict):
                                     curve_name = tag.get('curve_name', 'Unknown curve')
-                                    st.write(f"• **{curve_name}**: {tag['fault_classification']} at {tag['angle']:.2f}°")
+                                    # Make display name more readable - extract key part or truncate
+                                    display_name = curve_name
+                                    if len(curve_name) > 50:
+                                        # Extract meaningful part (e.g., "1HD2" from "578-A.1HD2.ULTRASONIC...")
+                                        parts = curve_name.split('.')
+                                        if len(parts) >= 2:
+                                            display_name = f"{parts[1]}... ({parts[0]})"
+                                        else:
+                                            display_name = curve_name[:50] + "..."
+                                    st.write(f"• **{display_name}**: {tag['fault_classification']} at {tag['angle']:.2f}°")
                                 else:
                                     # Handle legacy tags
                                     st.write(f"• Legacy tag: {tag:.2f}°")
