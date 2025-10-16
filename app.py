@@ -3214,6 +3214,19 @@ if validated_files:
                                 saved_count = 0
                                 waveform_count = 0
 
+                                # Debug: Show what curve names we're working with
+                                available_curves = [item['curve_name'] for item in temp_report_data]
+                                tag_curves = [tag.get('curve_name', 'N/A') if isinstance(tag, dict) else 'legacy' for tag in existing_tags]
+
+                                # Show debug info in expander
+                                with st.expander("🔍 Debug Info (Curve Matching)", expanded=False):
+                                    st.write("**Available curves in data:**")
+                                    for curve in available_curves:
+                                        st.write(f"  - `{curve}`")
+                                    st.write("**Tag curve names:**")
+                                    for curve in tag_curves:
+                                        st.write(f"  - `{curve}`")
+
                                 for item in temp_report_data:
                                     # Get or create analysis ID for this curve
                                     rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
@@ -3230,8 +3243,15 @@ if validated_files:
                                     db_client.execute("DELETE FROM anomaly_tags WHERE session_id = ? AND cylinder_name = ? AND curve_name = ? AND tag_type = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], 'Manual Tag'))
                                     for tag in existing_tags:
                                         if isinstance(tag, dict):
-                                            # Only save tag if it belongs to this specific curve (prevents duplicates)
-                                            if tag.get('curve_name') == item['curve_name']:
+                                            tag_curve = tag.get('curve_name', '')
+                                            item_curve = item['curve_name']
+
+                                            # Try exact match first
+                                            if tag_curve == item_curve:
+                                                save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                                saved_count += 1
+                                            # Try flexible matching: check if tag curve name contains the item curve name or vice versa
+                                            elif tag_curve and item_curve and (tag_curve in item_curve or item_curve in tag_curve):
                                                 save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
                                                 saved_count += 1
                                         else:
