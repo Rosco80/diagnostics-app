@@ -3433,111 +3433,74 @@ if validated_files:
                 else:
                     st.info("No valve sensors detected for this cylinder")
 
-                # Labeling and event marking
-                with st.expander("Add labels and mark valve events"):
-                    st.subheader("Fault Labels")
+                # Valve timing configuration
+                with st.expander("⚙️ Configure Valve Open/Close Events"):
+                    st.info("💡 Set valve timing for each curve. Values are in crank angle degrees.")
+
+                    # Load existing valve events from database
+                    valve_data = {}
                     for item in report_data:
-                        if item['count'] > 0 and item['name'] != 'Pressure':
-                            # FIXED: Use curve_name for unique keys instead of name
-                            curve_key = item['curve_name'].replace(' ', '_').replace('.', '_').replace('-', '_')
-                            with st.form(key=f"label_form_{curve_key}"):
-                                st.write(f"**{item['name']} Anomaly**")
+                        if item['name'] != 'Pressure':
+                            events_rs = db_client.execute(
+                                "SELECT curve_type, crank_angle FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+                                (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'])
+                            )
+                            events = {e[0]: e[1] for e in events_rs.rows}
+                            valve_data[item['name']] = {
+                                'curve_name': item['curve_name'],
+                                'open': events.get('open'),
+                                'close': events.get('close')
+                            }
 
-                                default_label = suggestions.get(item['name'], "Normal")
-                                if default_label in FAULT_LABELS:
-                                    selected_label = st.selectbox(
-                                        "Select fault label:",
-                                        options=FAULT_LABELS,
-                                        index=FAULT_LABELS.index(default_label),
-                                        key=f"sel_{curve_key}"
+                    # Single form for all valves
+                    with st.form("all_valve_events"):
+                        st.markdown("**Valve Timing Configuration**")
+                        for valve_name, data in valve_data.items():
+                            cols = st.columns([3, 2, 2])
+                            cols[0].write(f"**{valve_name}**")
+                            open_val = cols[1].number_input(
+                                "Open°",
+                                value=data['open'],
+                                key=f"open_{valve_name}",
+                                format="%.2f",
+                                help="Valve opening angle"
+                            )
+                            close_val = cols[2].number_input(
+                                "Close°",
+                                value=data['close'],
+                                key=f"close_{valve_name}",
+                                format="%.2f",
+                                help="Valve closing angle"
+                            )
+                            valve_data[valve_name]['open_input'] = open_val
+                            valve_data[valve_name]['close_input'] = close_val
+
+                        if st.form_submit_button("💾 Save All Valve Events", type="primary"):
+                            try:
+                                saved_count = 0
+                                for valve_name, data in valve_data.items():
+                                    # Clear existing events
+                                    db_client.execute(
+                                        "DELETE FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+                                        (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'])
                                     )
-                                else:
-                                    selected_label = st.selectbox(
-                                        "Select fault label:",
-                                        options=FAULT_LABELS,
-                                        key=f"sel_{curve_key}"
-                                    )
-
-                                custom_label = st.text_input(
-                                    "Or enter custom label if 'Other':",
-                                    key=f"txt_{curve_key}"
-                                )
-                                if st.form_submit_button("Save Label"):
-                                    final_label = custom_label if selected_label == "Other" and custom_label else selected_label
-                                    if final_label and final_label != "Other":
+                                    # Save new events
+                                    if data['open_input'] is not None:
                                         db_client.execute(
-                                            "INSERT INTO labels (analysis_id, label_text) VALUES (?, ?)",
-                                            (analysis_ids[item['name']], final_label)
+                                            "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
+                                            (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['open_input'], 0.0, 'open')
                                         )
-                                        st.success(f"Label '{final_label}' saved for {item['name']}.")
-
-                    with st.expander("⚙️ Configure Valve Open/Close Events", expanded=False):
-                        st.info("💡 Set valve timing for each curve. Values are in crank angle degrees.")
-
-                        # Load existing valve events from database
-                        valve_data = {}
-                        for item in report_data:
-                            if item['name'] != 'Pressure':
-                                events_rs = db_client.execute(
-                                    "SELECT curve_type, crank_angle FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
-                                    (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'])
-                                )
-                                events = {e[0]: e[1] for e in events_rs.rows}
-                                valve_data[item['name']] = {
-                                    'curve_name': item['curve_name'],
-                                    'open': events.get('open'),
-                                    'close': events.get('close')
-                                }
-
-                        # Single form for all valves
-                        with st.form("all_valve_events"):
-                            st.markdown("**Valve Timing Configuration**")
-                            for valve_name, data in valve_data.items():
-                                cols = st.columns([3, 2, 2])
-                                cols[0].write(f"**{valve_name}**")
-                                open_val = cols[1].number_input(
-                                    "Open°",
-                                    value=data['open'],
-                                    key=f"open_{valve_name}",
-                                    format="%.2f",
-                                    help="Valve opening angle"
-                                )
-                                close_val = cols[2].number_input(
-                                    "Close°",
-                                    value=data['close'],
-                                    key=f"close_{valve_name}",
-                                    format="%.2f",
-                                    help="Valve closing angle"
-                                )
-                                valve_data[valve_name]['open_input'] = open_val
-                                valve_data[valve_name]['close_input'] = close_val
-
-                            if st.form_submit_button("💾 Save All Valve Events", type="primary"):
-                                try:
-                                    saved_count = 0
-                                    for valve_name, data in valve_data.items():
-                                        # Clear existing events
+                                        saved_count += 1
+                                    if data['close_input'] is not None:
                                         db_client.execute(
-                                            "DELETE FROM valve_events WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
-                                            (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'])
+                                            "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
+                                            (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['close_input'], 0.0, 'close')
                                         )
-                                        # Save new events
-                                        if data['open_input'] is not None:
-                                            db_client.execute(
-                                                "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
-                                                (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['open_input'], 0.0, 'open')
-                                            )
-                                            saved_count += 1
-                                        if data['close_input'] is not None:
-                                            db_client.execute(
-                                                "INSERT INTO valve_events (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES (?, ?, ?, ?, ?, ?)",
-                                                (st.session_state.active_session_id, selected_cylinder_name, data['curve_name'], data['close_input'], 0.0, 'close')
-                                            )
-                                            saved_count += 1
-                                    st.success(f"✅ Saved {saved_count} valve events successfully!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Failed to save valve events: {str(e)}")
+                                        saved_count += 1
+                                st.success(f"✅ Saved {saved_count} valve events successfully!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Failed to save valve events: {str(e)}")
 
                 # Export and Cylinder Details
                                     
