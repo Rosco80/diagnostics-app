@@ -3230,11 +3230,14 @@ if validated_files:
                                     db_client.execute("DELETE FROM anomaly_tags WHERE session_id = ? AND cylinder_name = ? AND curve_name = ? AND tag_type = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], 'Manual Tag'))
                                     for tag in existing_tags:
                                         if isinstance(tag, dict):
-                                            save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                            # Only save tag if it belongs to this specific curve (prevents duplicates)
+                                            if tag.get('curve_name') == item['curve_name']:
+                                                save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                                saved_count += 1
                                         else:
-                                            # Handle legacy tags
+                                            # Handle legacy tags (no curve_name field) - save to all curves for backward compatibility
                                             save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag, 'Legacy tag', 'Manual Tag')
-                                        saved_count += 1
+                                            saved_count += 1
 
                                     # Save waveform data for ML training (Phase 2)
                                     curve_name = item['curve_name']
