@@ -2072,6 +2072,13 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black", secondary_y=False)
         fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
+    # Set explicit primary Y-axis range to prevent valve data from affecting pressure scale
+    if pressure_curve and pressure_curve in df.columns:
+        pressure_data = df[pressure_curve]
+        p_min = max(0, pressure_data.min() - 50)  # Start at 0 or slightly below min
+        p_max = pressure_data.max() + 50  # Add padding above max
+        fig.update_yaxes(range=[p_min, p_max], secondary_y=False)
+
     # FIXED: Simplified Y-axis range for valves based on typical vibration data
     if len(valve_curves) > 0:
         # Typical vibration range is 0-30 G
