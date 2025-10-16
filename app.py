@@ -2072,40 +2072,18 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black", secondary_y=False)
         fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
-    # Set explicit range for primary Y-axis (Pressure) to prevent auto-scaling
-    if pressure_curve and pressure_curve in df.columns:
-        pressure_data = df[pressure_curve]
-        pressure_min = pressure_data.min()
-        pressure_max = pressure_data.max()
-        # Add 10% padding above and below
-        pressure_range = pressure_max - pressure_min
-        y_min_pressure = pressure_min - (pressure_range * 0.1)
-        y_max_pressure = pressure_max + (pressure_range * 0.1)
-        # Ensure minimum range of at least 50 PSIG for visibility
-        if pressure_range < 50:
-            y_min_pressure = pressure_min - 25
-            y_max_pressure = pressure_max + 25
-        fig.update_yaxes(range=[y_min_pressure, y_max_pressure], secondary_y=False)
-
-    # FIXED: Dynamic Y-axis range for valves based on actual data and offset
+    # FIXED: Simplified Y-axis range for valves based on typical vibration data
     if len(valve_curves) > 0:
-        # Calculate max vibration value across all valve curves
-        max_vibration_value = 0
-        for vc in valve_curves:
-            curve_name = vc['curve']
-            if curve_name in df.columns:
-                max_val = df[curve_name].max()
-                if max_val > max_vibration_value:
-                    max_vibration_value = max_val
-
-        # Calculate range based on: (max_vibration * amplitude_scale) + (num_curves - 1) * offset
-        # This accounts for the highest curve being at the top
+        # Typical vibration range is 0-30 G
+        # With amplitude_scale and offset, calculate expected range
+        # Assume max vibration ~30 G, scale it, then add offsets for stacking
+        typical_max_vibration = 30
         total_offset = (len(valve_curves) - 1) * vertical_offset
-        max_scaled_value = (max_vibration_value * amplitude_scale) + total_offset
+        max_scaled_value = (typical_max_vibration * amplitude_scale) + total_offset
 
-        # Add 20% padding above and below
+        # Add 20% padding above, small padding below
         y_max = max_scaled_value * 1.2
-        y_min = -(max_vibration_value * amplitude_scale * 0.2)  # Small negative space for symmetry
+        y_min = -5  # Small negative space for visual balance
 
         # Apply the calculated range to the secondary Y-axis (valves)
         fig.update_yaxes(range=[y_min, y_max], secondary_y=True)
@@ -2866,14 +2844,14 @@ with st.sidebar:
     
     vertical_offset = st.slider(
         "Vertical Offset",
-        0.0, 50.0, 2.0, 1.0,
+        0.0, 50.0, 5.0, 1.0,
         key='vertical_offset',
         help="Spacing between valve curves. Increase for better separation when multiple valves are detected."
     )
 
     amplitude_scale = st.slider(
         "Valve Amplitude Scale",
-        0.1, 5.0, 0.1, 0.1,
+        0.1, 10.0, 3.0, 0.1,
         key='amplitude_scale',
         help="Scale valve vibration amplitude for better visibility (like dB zoom in analyzer)"
     )
