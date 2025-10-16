@@ -3250,28 +3250,6 @@ if validated_files:
                                 saved_count = 0
                                 waveform_count = 0
 
-                                # Debug: Show what curve names we're working with
-                                available_curves = [item['curve_name'] for item in temp_report_data]
-                                tag_curves = [tag.get('curve_name', 'N/A') if isinstance(tag, dict) else 'legacy' for tag in existing_tags]
-
-                                # Show debug info in expander
-                                with st.expander("🔍 Debug Info (Curve Matching)", expanded=False):
-                                    st.write("**Available curves in data:**")
-                                    for curve in available_curves:
-                                        st.write(f"  - `{curve}`")
-                                    st.write("**Tag curve names:**")
-                                    for curve in tag_curves:
-                                        st.write(f"  - `{curve}`")
-
-                                    # Show the mapping
-                                    st.write("**Display Name → Column Name Mapping:**")
-                                    if selected_cylinder_name in st.session_state.get('curve_name_mapping', {}):
-                                        mapping = st.session_state.curve_name_mapping[selected_cylinder_name]
-                                        for display, actual in mapping.items():
-                                            st.write(f"  - `{display}` → `{actual}`")
-                                    else:
-                                        st.write("  (No mapping found)")
-
                                 for item in temp_report_data:
                                     # Get or create analysis ID for this curve
                                     rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
