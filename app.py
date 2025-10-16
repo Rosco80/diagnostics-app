@@ -893,6 +893,50 @@ def save_anomaly_tag_to_db(db_client, session_id, cylinder_name, curve_name, cra
         raise
 
 
+def save_waveform_data_to_db(db_client, session_id, cylinder_name, curve_name, crank_angles, data_values, curve_type):
+    """
+    Save waveform data points to database for ML training.
+    Uses batch insert for efficiency.
+
+    Args:
+        db_client: Database client connection
+        session_id: Current session ID
+        cylinder_name: Name of the cylinder
+        curve_name: Name of the curve (e.g., "HE PT", "CE SV")
+        crank_angles: Array of crank angle values
+        data_values: Array of corresponding data values (pressure/vibration)
+        curve_type: Type of curve ("pressure" or "vibration")
+    """
+    try:
+        # First, check if waveform data already exists for this session/cylinder/curve
+        check_rs = db_client.execute(
+            "SELECT COUNT(*) FROM waveform_data WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+            (session_id, cylinder_name, curve_name)
+        )
+        existing_count = check_rs.rows[0][0] if check_rs.rows else 0
+
+        if existing_count > 0:
+            # Data already saved, skip to avoid duplicates
+            return
+
+        # Prepare batch insert statements
+        insert_statements = []
+        for angle, value in zip(crank_angles, data_values):
+            insert_statements.append(
+                f"INSERT INTO waveform_data (session_id, cylinder_name, curve_name, crank_angle, data_value, curve_type) VALUES ({session_id}, '{cylinder_name}', '{curve_name}', {angle}, {value}, '{curve_type}')"
+            )
+
+        # Execute in batches of 500 to avoid overwhelming the database
+        batch_size = 500
+        for i in range(0, len(insert_statements), batch_size):
+            batch = insert_statements[i:i+batch_size]
+            db_client.batch(batch)
+
+    except Exception as e:
+        st.warning(f"Could not save waveform data for {curve_name}: {e}")
+        # Don't raise - waveform saving is optional and shouldn't break the app
+
+
 def extract_rpm_from_source(source_xml_content):
     """
     Extract RPM directly from Source XML rows using Excel schema structure.
@@ -3168,18 +3212,20 @@ if validated_files:
                             if st.button("💾 Save Tags", key="save_tags"):
                                 # Save tags to database for all curves in this cylinder
                                 saved_count = 0
+                                waveform_count = 0
+
                                 for item in temp_report_data:
                                     # Get or create analysis ID for this curve
-                                    rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?", 
+                                    rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
                                                          (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
                                     existing_id_row = rs.rows[0] if rs.rows else None
                                     if existing_id_row:
                                         analysis_id = existing_id_row[0]
                                     else:
-                                        db_client.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)", 
+                                        db_client.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
                                                         (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
                                         analysis_id = get_last_row_id(db_client)
-                                    
+
                                     # Clear existing anomaly tags for this analysis and add new ones
                                     db_client.execute("DELETE FROM anomaly_tags WHERE session_id = ? AND cylinder_name = ? AND curve_name = ? AND tag_type = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], 'Manual Tag'))
                                     for tag in existing_tags:
@@ -3189,8 +3235,38 @@ if validated_files:
                                             # Handle legacy tags
                                             save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag, 'Legacy tag', 'Manual Tag')
                                         saved_count += 1
-                                
-                                st.success(f"✅ Saved {saved_count} classified tags to database!")
+
+                                    # Save waveform data for ML training (Phase 2)
+                                    curve_name = item['curve_name']
+                                    if curve_name in df.columns:
+                                        # Determine curve type based on the name/unit
+                                        curve_type = "pressure" if item['name'] == "Pressure" or item['unit'] == "PSIG" else "vibration"
+
+                                        # Get crank angles - check for Crank_Angle column
+                                        if 'Crank_Angle' in df.columns:
+                                            crank_angles = df['Crank_Angle'].values
+                                        elif df.index.name == 'Crank_Angle':
+                                            crank_angles = df.index.values
+                                        else:
+                                            # Fallback to using index as crank angles
+                                            crank_angles = df.index.values
+
+                                        # Get data values for this curve
+                                        data_values = df[curve_name].values
+
+                                        # Save to database
+                                        save_waveform_data_to_db(
+                                            db_client,
+                                            st.session_state.active_session_id,
+                                            selected_cylinder_name,
+                                            curve_name,
+                                            crank_angles,
+                                            data_values,
+                                            curve_type
+                                        )
+                                        waveform_count += 1
+
+                                st.success(f"✅ Saved {saved_count} classified tags and {waveform_count} waveform datasets to database!")
                         with tags_col3:
                             if st.button("🗑️ Clear Tags", key="clear_tags"):
                                 st.session_state.valve_event_tags[plot_key] = []
@@ -3497,3 +3573,170 @@ if rs.rows:
     st.download_button("📊 Download Labels as CSV", csv_data, "anomaly_labels.csv", "text/csv")
 else:
     st.info("📝 No labels found.")
+
+# --- Phase 2 Training Data Export Section ---
+st.markdown("---")
+st.header("🤖 Phase 2: AI Training Data Export")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("📥 Manual Fault Tags")
+    # Query anomaly_tags with session metadata
+    tags_query = """
+        SELECT
+            s.timestamp,
+            s.machine_id,
+            at.cylinder_name,
+            at.curve_name,
+            at.crank_angle,
+            at.fault_classification,
+            at.tag_type,
+            at.created_at
+        FROM anomaly_tags at
+        JOIN sessions s ON at.session_id = s.id
+    """
+    tags_params = []
+    if selected_machine_id_filter != "All":
+        tags_query += " WHERE s.machine_id = ?"
+        tags_params.append(selected_machine_id_filter)
+    tags_query += " ORDER BY at.created_at DESC"
+
+    tags_rs = db_client.execute(tags_query, tuple(tags_params))
+    if tags_rs.rows:
+        tags_df = pd.DataFrame(tags_rs.rows, columns=[
+            'Session Timestamp', 'Machine ID', 'Cylinder', 'Curve',
+            'Crank Angle', 'Fault Classification', 'Tag Type', 'Created At'
+        ])
+        st.dataframe(tags_df, use_container_width=True)
+
+        # Download button for tags
+        tags_csv = tags_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download Fault Tags CSV",
+            tags_csv,
+            "fault_tags_training_data.csv",
+            "text/csv",
+            key="download_tags"
+        )
+
+        # Display tag statistics
+        st.markdown("**Tag Statistics:**")
+        fault_counts = tags_df['Fault Classification'].value_counts()
+        for fault_type, count in fault_counts.items():
+            st.write(f"• {fault_type}: {count} tags")
+    else:
+        st.info("📝 No manual tags found. Use the tagging interface above to classify anomalies.")
+
+with col2:
+    st.subheader("🔬 Combined Training Dataset")
+    st.markdown("**Waveform data + Fault classifications**")
+
+    # Query combined waveform + tags data
+    combined_query = """
+        SELECT
+            s.machine_id,
+            s.timestamp,
+            wd.cylinder_name,
+            wd.curve_name,
+            wd.crank_angle,
+            wd.data_value,
+            wd.curve_type,
+            at.fault_classification
+        FROM waveform_data wd
+        JOIN sessions s ON wd.session_id = s.id
+        JOIN anomaly_tags at ON (
+            wd.session_id = at.session_id AND
+            wd.cylinder_name = at.cylinder_name AND
+            wd.curve_name = at.curve_name AND
+            ABS(wd.crank_angle - at.crank_angle) < 1.0
+        )
+    """
+    combined_params = []
+    if selected_machine_id_filter != "All":
+        combined_query += " WHERE s.machine_id = ?"
+        combined_params.append(selected_machine_id_filter)
+    combined_query += " ORDER BY s.timestamp DESC, wd.crank_angle ASC LIMIT 10000"
+
+    combined_rs = db_client.execute(combined_query, tuple(combined_params))
+    if combined_rs.rows:
+        combined_df = pd.DataFrame(combined_rs.rows, columns=[
+            'Machine ID', 'Session Time', 'Cylinder', 'Curve',
+            'Crank Angle', 'Value', 'Type', 'Fault Classification'
+        ])
+
+        st.write(f"**{len(combined_df):,} data points** with fault labels ready for training")
+        st.dataframe(combined_df.head(100), use_container_width=True)
+
+        # Download button for combined training data
+        combined_csv = combined_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download Training Dataset CSV",
+            combined_csv,
+            "ml_training_dataset.csv",
+            "text/csv",
+            key="download_combined"
+        )
+    else:
+        st.info("📝 No combined training data available yet. Save tags with waveforms to generate training data.")
+
+# Data Integrity Check
+st.markdown("---")
+st.header("✅ Data Integrity & Readiness Check")
+
+integrity_col1, integrity_col2, integrity_col3, integrity_col4 = st.columns(4)
+
+with integrity_col1:
+    sessions_rs = db_client.execute("SELECT COUNT(*) FROM sessions")
+    session_count = sessions_rs.rows[0][0] if sessions_rs.rows else 0
+    st.metric("Total Sessions", session_count)
+
+with integrity_col2:
+    tags_count_rs = db_client.execute("SELECT COUNT(*) FROM anomaly_tags")
+    tags_count = tags_count_rs.rows[0][0] if tags_count_rs.rows else 0
+    st.metric("Manual Tags", tags_count)
+
+with integrity_col3:
+    waveform_rs = db_client.execute("SELECT COUNT(DISTINCT session_id || cylinder_name || curve_name) FROM waveform_data")
+    waveform_count = waveform_rs.rows[0][0] if waveform_rs.rows else 0
+    st.metric("Waveform Datasets", waveform_count)
+
+with integrity_col4:
+    analyses_rs = db_client.execute("SELECT COUNT(*) FROM analyses")
+    analyses_count = analyses_rs.rows[0][0] if analyses_rs.rows else 0
+    st.metric("Analyses", analyses_count)
+
+# Check against PRD requirements
+st.subheader("📊 Phase 2 Training Data Requirements (PRD Section 7.1)")
+
+prd_requirements = {
+    "Normal": 100,
+    "Valve Leakage": 50,
+    "Valve Wear": 30,
+    "Valve Sticking or Fouling": 25,
+    "Valve Impact or Slamming": 25
+}
+
+# Get current fault distribution
+fault_dist_rs = db_client.execute("""
+    SELECT fault_classification, COUNT(*) as count
+    FROM anomaly_tags
+    GROUP BY fault_classification
+""")
+
+fault_distribution = {row[0]: row[1] for row in fault_dist_rs.rows} if fault_dist_rs.rows else {}
+
+# Display progress
+for fault_type, required in prd_requirements.items():
+    current = fault_distribution.get(fault_type, 0)
+    percentage = min(100, int((current / required) * 100))
+
+    status_color = "🟢" if current >= required else "🟡" if current >= required * 0.5 else "🔴"
+    st.write(f"{status_color} **{fault_type}**: {current}/{required} ({percentage}%)")
+    st.progress(percentage / 100)
+
+if sum(fault_distribution.values()) >= 200:
+    st.success("✅ Sufficient data collected for Phase 2 supervised learning!")
+else:
+    remaining = 200 - sum(fault_distribution.values())
+    st.warning(f"⚠️ Need {remaining} more tagged examples to meet minimum Phase 2 requirements.")
