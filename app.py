@@ -40,7 +40,7 @@ if 'pending_tag' not in st.session_state:
 # --- Global Configuration & Constants ---
 FAULT_LABELS = [
     "Normal", "Valve Leakage", "Valve Wear", "Valve Sticking or Fouling",
-    "Valve Impact or Slamming", "Broken or Missing Valve Parts",
+    "Closing Hard or Slamming", "Broken or Missing Valve Parts",
     "Valve Misalignment", "Spring Fatigue or Failure", "Other"
 ]
 
@@ -2357,7 +2357,7 @@ def run_rule_based_diagnostics_enhanced(report_data, pressure_limit=10, valve_li
                         suggestions[item_name] = 'Valve Wear'
                 elif 'Discharge' in item_name:
                     if anomaly_count > valve_limit * 1.5:
-                        suggestions[item_name] = 'Valve Impact or Slamming'
+                        suggestions[item_name] = 'Closing Hard or Slamming'
                         critical_alerts.append(f"HIGH: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
                     else:
                         suggestions[item_name] = 'Valve Wear'
@@ -3723,7 +3723,7 @@ prd_requirements = {
     "Valve Leakage": 50,
     "Valve Wear": 30,
     "Valve Sticking or Fouling": 25,
-    "Valve Impact or Slamming": 25
+    "Closing Hard or Slamming": 25
 }
 
 # Get current fault distribution
@@ -3749,3 +3749,4 @@ if sum(fault_distribution.values()) >= 200:
 else:
     remaining = 200 - sum(fault_distribution.values())
     st.warning(f"⚠️ Need {remaining} more tagged examples to meet minimum Phase 2 requirements.")
+
