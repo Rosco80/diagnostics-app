@@ -3749,4 +3749,3 @@ if sum(fault_distribution.values()) >= 200:
 else:
     remaining = 200 - sum(fault_distribution.values())
     st.warning(f"⚠️ Need {remaining} more tagged examples to meet minimum Phase 2 requirements.")
-
