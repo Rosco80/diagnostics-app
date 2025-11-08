@@ -2072,6 +2072,29 @@ def generate_cylinder_view(_db_client, df, cylinder_config, envelope_view, verti
         fig.update_yaxes(title_text="<b>Pressure (PSIG)</b>", color="black", secondary_y=False)
         fig.update_yaxes(title_text="<b>Vibration (G) with Offset</b>", color="blue", secondary_y=True)
 
+    # Keep the crank-angle axis stable when annotations are added during tagging
+    if view_mode == "Crank-angle":
+        crank_angle_series = None
+        if 'Crank Angle' in df.columns:
+            crank_angle_series = df['Crank Angle']
+        elif 'Crank_Angle' in df.columns:
+            crank_angle_series = df['Crank_Angle']
+        elif df.index.name in ('Crank Angle', 'Crank_Angle'):
+            crank_angle_series = df.index.to_series()
+
+        if crank_angle_series is not None:
+            valid_angles = pd.Series(crank_angle_series).dropna()
+            if not valid_angles.empty:
+                min_angle = float(valid_angles.min())
+                max_angle = float(valid_angles.max())
+                if math.isfinite(min_angle) and math.isfinite(max_angle):
+                    # Ensure a non-zero span even if all values are identical
+                    if math.isclose(min_angle, max_angle):
+                        padding = max(1.0, abs(min_angle) * 0.01 + 1.0)
+                        min_angle -= padding
+                        max_angle += padding
+                    fig.update_xaxes(range=[min_angle, max_angle], autorange=False)
+
     # FIXED: Dynamic Y-axis range for valves based on offset and valve count
     if len(valve_curves) > 0:
         # Calculate total offset range needed
