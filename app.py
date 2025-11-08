@@ -3189,13 +3189,19 @@ if validated_files:
                                 st.rerun()
                     
                     # Interactive chart with click detection
-                    clicked_data = st.plotly_chart(
-                        fig, 
-                        use_container_width=True,
-                        on_select="rerun",
-                        selection_mode="points",
-                        key=f"interactive_chart_{plot_key}"
-                    )
+                    # NOTE: keeping the chart in this dedicated container maintains
+                    # consistent width during reruns on narrower screens.
+                    plot_container = st.container()
+                    with plot_container:
+                        st.markdown('<div class="full-width-plot">', unsafe_allow_html=True)
+                        clicked_data = st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            on_select="rerun",
+                            selection_mode="points",
+                            key=f"interactive_chart_{plot_key}"
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
                     
                     # Check if we got click data
                     if hasattr(clicked_data, 'selection') and clicked_data.selection:
@@ -3226,8 +3232,8 @@ if validated_files:
                     # Show current tags and save options
                     if existing_tags:
                         st.markdown("#### 🏷️ Current Tags")
-                        tags_col1, tags_col2, tags_col3 = st.columns([2, 1, 1])
-                        with tags_col1:
+                        tags_container = st.container()
+                        with tags_container:
                             for i, tag in enumerate(existing_tags):
                                 if isinstance(tag, dict):
                                     curve_name = tag.get('curve_name', 'Unknown curve')
@@ -3244,79 +3250,82 @@ if validated_files:
                                 else:
                                     # Handle legacy tags
                                     st.write(f"• Legacy tag: {tag:.2f}°")
-                        with tags_col2:
-                            if st.button("💾 Save Tags", key="save_tags"):
-                                # Save tags to database for all curves in this cylinder
-                                saved_count = 0
-                                waveform_count = 0
 
-                                for item in temp_report_data:
-                                    # Get or create analysis ID for this curve
-                                    rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
-                                                         (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
-                                    existing_id_row = rs.rows[0] if rs.rows else None
-                                    if existing_id_row:
-                                        analysis_id = existing_id_row[0]
-                                    else:
-                                        db_client.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
+                            action_cols = st.columns([1, 1])
+                            with action_cols[0]:
+                                if st.button("💾 Save Tags", key="save_tags"):
+                                    # Save tags to database for all curves in this cylinder
+                                    saved_count = 0
+                                    waveform_count = 0
+
+                                    for item in temp_report_data:
+                                        # Get or create analysis ID for this curve
+                                        rs = db_client.execute("SELECT id FROM analyses WHERE session_id = ? AND cylinder_name = ? AND curve_name = ?",
+                                                             (st.session_state.active_session_id, selected_cylinder_name, item['curve_name']))
+                                        existing_id_row = rs.rows[0] if rs.rows else None
+                                        if existing_id_row:
+                                            analysis_id = existing_id_row[0]
+                                        else:
+                                            db_client.execute("INSERT INTO analyses (session_id, cylinder_name, curve_name, anomaly_count, threshold) VALUES (?, ?, ?, ?, ?)",
                                                         (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], item['count'], item['threshold']))
-                                        analysis_id = get_last_row_id(db_client)
+                                            analysis_id = get_last_row_id(db_client)
 
-                                    # Clear existing anomaly tags for this analysis and add new ones
-                                    db_client.execute("DELETE FROM anomaly_tags WHERE session_id = ? AND cylinder_name = ? AND curve_name = ? AND tag_type = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], 'Manual Tag'))
-                                    for tag in existing_tags:
-                                        if isinstance(tag, dict):
-                                            tag_curve = tag.get('curve_name', '')
-                                            item_curve = item['curve_name']
+                                        # Clear existing anomaly tags for this analysis and add new ones
+                                        db_client.execute("DELETE FROM anomaly_tags WHERE session_id = ? AND cylinder_name = ? AND curve_name = ? AND tag_type = ?", (st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], 'Manual Tag'))
+                                        for tag in existing_tags:
+                                            if isinstance(tag, dict):
+                                                tag_curve = tag.get('curve_name', '')
+                                                item_curve = item['curve_name']
 
-                                            # Try exact match first
-                                            if tag_curve == item_curve:
-                                                save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                                # Try exact match first
+                                                if tag_curve == item_curve:
+                                                    save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                                    saved_count += 1
+                                                # Try flexible matching: check if tag curve name contains the item curve name or vice versa
+                                                elif tag_curve and item_curve and (tag_curve in item_curve or item_curve in tag_curve):
+                                                    save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
+                                                    saved_count += 1
+                                            else:
+                                                # Handle legacy tags (no curve_name field) - save to all curves for backward compatibility
+                                                save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag, 'Legacy tag', 'Manual Tag')
                                                 saved_count += 1
-                                            # Try flexible matching: check if tag curve name contains the item curve name or vice versa
-                                            elif tag_curve and item_curve and (tag_curve in item_curve or item_curve in tag_curve):
-                                                save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag['angle'], tag['fault_classification'], 'Manual Tag')
-                                                saved_count += 1
-                                        else:
-                                            # Handle legacy tags (no curve_name field) - save to all curves for backward compatibility
-                                            save_anomaly_tag_to_db(db_client, st.session_state.active_session_id, selected_cylinder_name, item['curve_name'], tag, 'Legacy tag', 'Manual Tag')
-                                            saved_count += 1
 
-                                    # Save waveform data for ML training (Phase 2)
-                                    curve_name = item['curve_name']
-                                    if curve_name in df.columns:
-                                        # Determine curve type based on the name/unit
-                                        curve_type = "pressure" if item['name'] == "Pressure" or item['unit'] == "PSIG" else "vibration"
+                                        # Save waveform data for ML training (Phase 2)
+                                        curve_name = item['curve_name']
+                                        if curve_name in df.columns:
+                                            # Determine curve type based on the name/unit
+                                            curve_type = "pressure" if item['name'] == "Pressure" or item['unit'] == "PSIG" else "vibration"
 
-                                        # Get crank angles - check for Crank_Angle column
-                                        if 'Crank_Angle' in df.columns:
-                                            crank_angles = df['Crank_Angle'].values
-                                        elif df.index.name == 'Crank_Angle':
-                                            crank_angles = df.index.values
-                                        else:
-                                            # Fallback to using index as crank angles
-                                            crank_angles = df.index.values
+                                            # Get crank angles - check for Crank_Angle column
+                                            if 'Crank_Angle' in df.columns:
+                                                crank_angles = df['Crank_Angle'].values
+                                            elif df.index.name == 'Crank_Angle':
+                                                crank_angles = df.index.values
+                                            else:
+                                                # Fallback to using index as crank angles
+                                                crank_angles = df.index.values
 
-                                        # Get data values for this curve
-                                        data_values = df[curve_name].values
+                                            # Get data values for this curve
+                                            data_values = df[curve_name].values
 
-                                        # Save to database
-                                        save_waveform_data_to_db(
-                                            db_client,
-                                            st.session_state.active_session_id,
-                                            selected_cylinder_name,
-                                            curve_name,
-                                            crank_angles,
-                                            data_values,
-                                            curve_type
-                                        )
-                                        waveform_count += 1
+                                            # Save to database
+                                            save_waveform_data_to_db(
+                                                db_client,
+                                                st.session_state.active_session_id,
+                                                selected_cylinder_name,
+                                                curve_name,
+                                                crank_angles,
+                                                data_values,
+                                                curve_type
+                                            )
+                                            waveform_count += 1
 
-                                st.success(f"✅ Saved {saved_count} classified tags and {waveform_count} waveform datasets to database!")
-                        with tags_col3:
-                            if st.button("🗑️ Clear Tags", key="clear_tags"):
-                                st.session_state.valve_event_tags[plot_key] = []
-                                st.rerun()
+                                    st.success(f"✅ Saved {saved_count} classified tags and {waveform_count} waveform datasets to database!")
+
+                            with action_cols[1]:
+                                if st.button("🗑️ Clear Tags", key="clear_tags"):
+                                    st.session_state.valve_event_tags[plot_key] = []
+                                    st.rerun()
                 # else:
                 #     st.plotly_chart(fig, use_container_width=True)  # REMOVED: Duplicate plot without valve events
 
