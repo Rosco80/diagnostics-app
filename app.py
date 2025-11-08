@@ -39,9 +39,9 @@ if 'pending_tag' not in st.session_state:
 
 # --- Global Configuration & Constants ---
 FAULT_LABELS = [
-    "Normal", "Valve Leakage", "Valve Wear", "Valve Sticking or Fouling",
+    "Valve Opening", "Valve Leakage", "Valve Sticking",
     "Closing Hard or Slamming", "Broken or Missing Valve Parts",
-    "Valve Misalignment", "Spring Fatigue or Failure", "Other"
+    "Spring Fatigue or Failure", "Other"
 ]
 
 # Tagging-specific fault classifications (aligned with supervised learning goals)
@@ -775,16 +775,11 @@ def run_anomaly_detection(df, curve_names, contamination_level=0.05):
 
 def run_rule_based_diagnostics(report_data):
     """
-    Returns a dict: { item['name'] -> suggested_label_in_FAULT_LABELS }
+    DEPRECATED: Fault type suggestions disabled - AI only detects anomalies.
+    Users should manually classify faults using interactive tagging.
+    Returns empty dict to maintain backward compatibility.
     """
-    suggestions = {}
-    for item in report_data:
-        # Pressure anomalies -> suggest Valve Leakage
-        if item['name'] == 'Pressure' and item['count'] > 10:
-            suggestions[item['name']] = 'Valve Leakage'
-        # Any valve anomalies -> suggest Valve Wear (generic, matches FAULT_LABELS)
-        elif item['name'] != 'Pressure' and item['count'] > 5:
-            suggestions[item['name']] = 'Valve Wear'
+    suggestions = {}  # Empty - no automatic fault classification
     return suggestions
     
 def compute_health_score(report_data, diagnostics):
@@ -2352,61 +2347,48 @@ def render_ai_model_tuning_section(db_client, discovered_config):
         return contamination_level, 10, 5  # Default limits
 
 def run_rule_based_diagnostics_enhanced(report_data, pressure_limit=10, valve_limit=5):
-    """Enhanced rule-based diagnostics using machine-specific thresholds"""
-    suggestions = {}
+    """
+    Enhanced diagnostics - Returns critical alerts based on anomaly counts.
+    NOTE: Fault type suggestions disabled - AI only detects anomalies, users manually classify via tagging.
+    """
+    suggestions = {}  # Empty - no automatic fault classification
     critical_alerts = []
-    
+
     for item in report_data:
         item_name = item['name']
         anomaly_count = item['count']
-        
-        # Pressure-specific rules
-        if item_name == 'Pressure':
-            if anomaly_count > pressure_limit:
-                if anomaly_count > pressure_limit * 2:
-                    suggestions[item_name] = 'Valve Leakage'
-                    critical_alerts.append(f"CRITICAL: {item_name} has {anomaly_count} anomalies (limit: {pressure_limit})")
-                else:
-                    suggestions[item_name] = 'Valve Wear'
-        
-        # Valve-specific rules
-        elif item_name != 'Pressure':
-            if anomaly_count > valve_limit:
-                if 'Suction' in item_name:
-                    if anomaly_count > valve_limit * 2:
-                        suggestions[item_name] = 'Valve Sticking or Fouling'
-                        critical_alerts.append(f"CRITICAL: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
-                    else:
-                        suggestions[item_name] = 'Valve Wear'
-                elif 'Discharge' in item_name:
-                    if anomaly_count > valve_limit * 1.5:
-                        suggestions[item_name] = 'Closing Hard or Slamming'
-                        critical_alerts.append(f"HIGH: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
-                    else:
-                        suggestions[item_name] = 'Valve Wear'
-                else:
-                    suggestions[item_name] = 'Valve Wear'
 
-    # Check for "all valves leaking" condition (cylinder-level failure)
-    # Group valves by cylinder end
+        # Pressure-specific alerts (counts only, no fault guessing)
+        if item_name == 'Pressure':
+            if anomaly_count > pressure_limit * 2:
+                critical_alerts.append(f"CRITICAL: {item_name} has {anomaly_count} anomalies (limit: {pressure_limit})")
+            elif anomaly_count > pressure_limit:
+                critical_alerts.append(f"HIGH: {item_name} has {anomaly_count} anomalies (limit: {pressure_limit})")
+
+        # Valve-specific alerts (counts only, no fault guessing)
+        elif item_name != 'Pressure':
+            if 'Suction' in item_name and anomaly_count > valve_limit * 2:
+                critical_alerts.append(f"CRITICAL: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
+            elif 'Discharge' in item_name and anomaly_count > valve_limit * 1.5:
+                critical_alerts.append(f"HIGH: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
+            elif anomaly_count > valve_limit:
+                critical_alerts.append(f"WARNING: {item_name} has {anomaly_count} anomalies (limit: {valve_limit})")
+
+    # Check for "all valves affected" condition (cylinder-level issue)
     he_valves = [item for item in report_data if 'HE' in item['name'] and item['name'] != 'Pressure']
     ce_valves = [item for item in report_data if 'CE' in item['name'] and item['name'] != 'Pressure']
 
-    # Check if most/all valves exceed threshold (more conservative detection)
-    # Requires: 85% of valves with 2x threshold OR minimum 15 anomalies (whichever is higher)
     for valves, end_name in [(he_valves, 'Head End'), (ce_valves, 'Crank End')]:
         if len(valves) > 0:
-            # Count valves with significant anomalies (2x limit OR min 15)
             high_anomaly_count = sum(1 for v in valves if v['count'] > max(valve_limit * 2, 15))
             affected_percentage = (high_anomaly_count / len(valves)) * 100
 
             if high_anomaly_count / len(valves) >= 0.85:  # 85% or more valves severely affected
                 critical_alerts.append(
-                    f"CRITICAL: All valves on {end_name} affected ({affected_percentage:.0f}%) - cylinder-level failure suspected"
+                    f"CRITICAL: All valves on {end_name} affected ({affected_percentage:.0f}%) - cylinder-level issue suspected"
                 )
-                suggestions[f'All Valves - {end_name}'] = 'Cylinder-Level Failure (All Valves Affected)'
 
-    return suggestions, critical_alerts
+    return suggestions, critical_alerts  # suggestions always empty now
 
 def check_and_display_alerts(db_client, machine_id, cylinder_name, critical_alerts, health_score):
     """Check for critical conditions and display in-app alerts"""
@@ -3751,11 +3733,14 @@ with integrity_col4:
 st.subheader("📊 Phase 2 Training Data Requirements (PRD Section 7.1)")
 
 prd_requirements = {
-    "Normal": 100,
+    "Valve Opening": 100,  # Renamed from "Normal"
     "Valve Leakage": 50,
-    "Valve Wear": 30,
-    "Valve Sticking or Fouling": 25,
-    "Closing Hard or Slamming": 25
+    "Valve Sticking": 25,  # Renamed from "Valve Sticking or Fouling"
+    "Closing Hard or Slamming": 25,
+    "Broken or Missing Valve Parts": 20,
+    "Spring Fatigue or Failure": 15,
+    "Other": 10
+    # Note: "Valve Wear" and "Valve Misalignment" removed from label list
 }
 
 # Get current fault distribution
